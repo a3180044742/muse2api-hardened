@@ -216,7 +216,7 @@ async function run() {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + key,
       },
-      body: JSON.stringify({ label, cookies, expires }),
+      body: JSON.stringify({ label, cookies, cookie_expires: expires }),
     });
 
     const text = await res.text();

@@ -109,7 +109,7 @@ async def test_session_errors_while_confirming(upstream, failure):
     clock = FakeClock()
     info = await _renew(clock, confirm_s=4, poll_s=2)
     assert info.ok  # the renewal itself worked
-    assert info.meta["vm_wake_ok"] is False
+    assert info.meta["vm_wake_ok"] is None  # unknown, not down
     assert info.meta["vm_state_after"] is None
 
 
@@ -119,14 +119,33 @@ async def test_error_then_running_still_confirms(upstream):
     assert info.meta["vm_wake_ok"] is True
 
 
-@pytest.mark.parametrize("wake", [httpx.Response(500), httpx.ConnectTimeout("slow")])
-async def test_rejected_wake_is_not_polled(upstream, wake):
-    upstream["sessions"] = [session("SUSPENDED")]
+@pytest.mark.parametrize("wake,code", [
+    # Observed live 2026-10-24: muse.ai answers 403 to waking a RUNNING VM.
+    (httpx.Response(403, json={"error": "Forbidden"}), "403"),
+    (httpx.Response(500), "500"),
+    (httpx.ConnectTimeout("slow"), "ConnectTimeout"),
+])
+async def test_rejected_wake_on_a_running_vm_is_still_ok(upstream, wake, code):
+    upstream["sessions"] = [session("RUNNING")]
     upstream["wake"] = wake
     clock = FakeClock()
     info = await _renew(clock, confirm_s=20)
-    assert info.meta["vm_wake_ok"] is False and info.meta["vm_state_after"] is None
-    assert upstream["gets"] == 1 and clock.sleeps == []
+    assert info.meta["vm_wake_ok"] is True and info.meta["vm_state_after"] == "RUNNING"
+    assert info.meta["vm_wake_http"] == code
+    assert clock.sleeps == []
+
+
+async def test_rejected_wake_on_a_stopped_vm_is_not_ok(upstream):
+    upstream["sessions"] = [session("SUSPENDED")]
+    upstream["wake"] = httpx.Response(403, json={"error": "Forbidden"})
+    info = await _renew(FakeClock(), confirm_s=4, poll_s=2)
+    assert info.meta["vm_wake_ok"] is False and info.meta["vm_state_after"] == "SUSPENDED"
+
+
+def test_unknown_wake_outcome_does_not_block_video():
+    acc = Account(id="a1", cookies=dict(COOKIES))
+    note_wake(acc, {"vm_wake_ok": None, "vm_state_after": None})
+    assert not (acc.meta.get("kind_blocked_until") or {}).get("video")
 
 
 async def test_no_wake_without_vm(upstream):

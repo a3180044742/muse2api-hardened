@@ -85,10 +85,13 @@ async def renew_session(
     """Hit the session endpoint, which rotates short-lived cookies via Set-Cookie,
     and optionally wake the account's cloud workspace so the first request is fast.
 
-    After an acknowledged wake the session endpoint is polled until it reports the
-    VM ``RUNNING`` or ``confirm_s`` (default ``MUSE2API_WAKE_CONFIRM_S``, 20s) runs
-    out. ``meta["vm_wake_ok"]`` is that confirmation, ``meta["vm_state_after"]`` the
-    last state seen while polling (None when no poll succeeded)."""
+    After the wake request, whatever it answered, the session endpoint is polled
+    until it reports the VM ``RUNNING`` or ``confirm_s`` (default
+    ``MUSE2API_WAKE_CONFIRM_S``, 20s) runs out. ``meta["vm_state_after"]`` is the
+    last state seen while polling (None when no poll succeeded) and
+    ``meta["vm_wake_ok"]`` is True for RUNNING, False for any other state seen, and
+    None when no state was seen. ``meta["vm_wake_http"]`` records the wake's own
+    status code (or exception name) for diagnosis."""
     headers = {
         "User-Agent": USER_AGENT,
         "Origin": SITE,
@@ -112,8 +115,6 @@ async def renew_session(
                                  ("vm_state", "vm_state"))}
 
         if wake_vm and meta["vm_id"] and meta["vm_state"] != "DISABLED":
-            # Both set on every attempt so no stale value outlives a failed wake.
-            meta["vm_wake_ok"], meta["vm_state_after"] = False, None
             try:
                 w = await client.post(
                     VM_WAKE_API,
@@ -121,15 +122,18 @@ async def renew_session(
                     json={"vm_id": meta["vm_id"], "retry_count": 0,
                           "connect_attempt_id": str(uuid.uuid4())},
                 )
-            except httpx.HTTPError:
-                pass
-            else:
-                if w.status_code == 200:
-                    meta["vm_state_after"] = await _confirm_running(
-                        client, jar, expires, timeout=timeout,
-                        confirm_s=wake_confirm_seconds() if confirm_s is None else confirm_s,
-                        poll_s=poll_s, sleep=sleep, clock=clock)
-                    meta["vm_wake_ok"] = meta["vm_state_after"] == "RUNNING"
+                meta["vm_wake_http"] = str(w.status_code)
+            except httpx.HTTPError as exc:
+                meta["vm_wake_http"] = type(exc).__name__
+            # The wake's own answer says little: muse.ai answers 403 to a wake for a
+            # VM that is already RUNNING. Judge by the state the session reports.
+            meta["vm_state_after"] = await _confirm_running(
+                client, jar, expires, timeout=timeout,
+                confirm_s=wake_confirm_seconds() if confirm_s is None else confirm_s,
+                poll_s=poll_s, sleep=sleep, clock=clock)
+            # None when no poll answered: unknown is not evidence the VM is down.
+            meta["vm_wake_ok"] = (None if meta["vm_state_after"] is None
+                                  else meta["vm_state_after"] == "RUNNING")
 
     return SessionInfo(ok=meta["session_status"] == "assigned", cookies=jar,
                        cookie_expires=expires, meta=meta)

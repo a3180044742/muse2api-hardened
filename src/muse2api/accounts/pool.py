@@ -24,6 +24,39 @@ from .store import AccountStore
 
 log = logging.getLogger(__name__)
 
+WAKE_BLOCK_KIND = "video"
+WAKE_BLOCK_SECONDS = 600
+"""How long an account whose VM wake was not confirmed is skipped for video: a video
+on a VM that is not RUNNING stalls for minutes."""
+
+
+def _kind_blocked_until(acc: Account, kind: str) -> float:
+    return float((acc.meta.get("kind_blocked_until") or {}).get(kind, 0.0))
+
+
+def note_wake(acc: Account, session_meta: dict) -> None:
+    """Apply the VM wake outcome of one session renewal (``session_meta`` is that
+    renewal's ``SessionInfo.meta``) through the per-kind block in
+    ``meta["kind_blocked_until"]``: an unconfirmed wake blocks video for
+    ``WAKE_BLOCK_SECONDS``; a confirmed one lifts that block again, but never a
+    longer block set for another reason."""
+    ok = session_meta.get("vm_wake_ok")
+    if ok is None:  # no wake attempted this time
+        return
+    now = time.time()
+    blocks = {k: t for k, t in (acc.meta.get("kind_blocked_until") or {}).items() if t > now}
+    ours = acc.meta.pop("wake_blocked_until", None)
+    if not ok:
+        until = now + WAKE_BLOCK_SECONDS
+        if blocks.get(WAKE_BLOCK_KIND, 0.0) < until:
+            blocks[WAKE_BLOCK_KIND] = until
+            acc.meta["wake_blocked_until"] = until
+            log.warning("account %s vm wake not confirmed (state %s); no video on it for %ds",
+                        acc.id, session_meta.get("vm_state_after"), WAKE_BLOCK_SECONDS)
+    elif ours is not None and blocks.get(WAKE_BLOCK_KIND) == ours:
+        del blocks[WAKE_BLOCK_KIND]
+    acc.meta["kind_blocked_until"] = blocks
+
 
 # ---------------------------------------------------------------- strategies
 class Strategy(Protocol):
@@ -141,11 +174,24 @@ class AccountPool:
         }
 
     # ---- scheduling ----
-    def _candidates(self, exclude: Iterable[str]) -> tuple[list[Account], bool, float | None]:
+    def _kind_blocked(self, kind: str | None, now: float) -> set[str]:
+        """Ids of accounts still blocked for ``kind`` (see ``note_wake``). Empty when
+        every usable account is blocked: a block must never make the kind unusable
+        altogether, so then everyone gets tried again."""
+        if kind is None:
+            return set()
+        usable = [a for a in self._accounts.values()
+                  if a.enabled and a.status != AccountStatus.INVALID]
+        blocked = {a.id for a in usable if _kind_blocked_until(a, kind) > now}
+        return set() if len(blocked) == len(usable) else blocked
+
+    def _candidates(
+        self, exclude: Iterable[str], kind: str | None = None
+    ) -> tuple[list[Account], bool, float | None]:
         """Returns (free candidates, whether a usable account is merely busy, and the
         earliest time a cooling account comes back, if any)."""
         now = time.time()
-        excluded = set(exclude)
+        excluded = set(exclude) | self._kind_blocked(kind, now)
         free, busy, back_at = [], False, None
         for acc in self._accounts.values():
             if acc.id in excluded or not acc.enabled or acc.status == AccountStatus.INVALID:
@@ -159,18 +205,21 @@ class AccountPool:
             free.append(acc)
         return free, busy, back_at
 
-    def has_alternative(self, exclude: Iterable[str]) -> bool:
-        """Whether an enabled, valid account exists outside ``exclude`` (busy or cooling counts)."""
-        excluded = set(exclude)
+    def has_alternative(self, exclude: Iterable[str], kind: str | None = None) -> bool:
+        """Whether an enabled, valid account exists outside ``exclude`` (busy or cooling counts)
+        that is not blocked for ``kind``."""
+        excluded = set(exclude) | self._kind_blocked(kind, time.time())
         return any(a.id not in excluded and a.enabled and a.status != AccountStatus.INVALID
                    for a in self._accounts.values())
 
-    async def acquire(self, *, exclude: Iterable[str] = (), hint: str | None = None) -> Account:
+    async def acquire(
+        self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None
+    ) -> Account:
         exclude = tuple(exclude)
         deadline = time.monotonic() + self.acquire_timeout
         async with self._cond:
             while True:
-                free, busy, back_at = self._candidates(exclude)
+                free, busy, back_at = self._candidates(exclude, kind)
                 if free:
                     acc = self.strategy.choose(free, hint)
                     self._inflight[acc.id] += 1
@@ -224,9 +273,9 @@ class AccountPool:
 
     @asynccontextmanager
     async def lease(
-        self, *, exclude: Iterable[str] = (), hint: str | None = None
+        self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None
     ) -> AsyncIterator[Lease]:
-        acc = await self.acquire(exclude=exclude, hint=hint)
+        acc = await self.acquire(exclude=exclude, hint=hint, kind=kind)
         lease = Lease(acc)
         try:
             yield lease

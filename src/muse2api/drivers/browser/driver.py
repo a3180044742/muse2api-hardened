@@ -17,6 +17,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import os
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from ...accounts.model import Account
 from ...config import Settings
 from ...core.prompt import followup_text
 from ...errors import (
+    Muse2APIError,
     UpstreamAuthError,
     UpstreamError,
     UpstreamQuotaError,
@@ -55,6 +57,23 @@ STABLE_POLLS_DONE = 4
 STABLE_POLLS_FORCE = 12
 # Past this many assistant bubbles the page gets slow and a new thread is cheaper.
 HOT_BUBBLE_LIMIT = 16
+QUOTA_CACHE_SECONDS = 1800.0
+
+
+def quota_cache_seconds() -> float:
+    """``MUSE2API_QUOTA_CACHE_S`` (read here: config.py has no knob for it)."""
+    try:
+        return max(0.0, float(os.environ.get("MUSE2API_QUOTA_CACHE_S", QUOTA_CACHE_SECONDS)))
+    except ValueError:
+        return QUOTA_CACHE_SECONDS
+
+
+class AccountBusy(Muse2APIError):
+    """Every tab of the account is serving a request; a quota read never takes one over."""
+
+    status_code = 409
+    error_type = "server_error"
+    code = "account_busy"
 
 
 def is_thread_url(url: str) -> bool:
@@ -88,7 +107,8 @@ class _Tab:
 class BrowserDriver(MuseDriver):
     name = "browser"
     capabilities = DriverCapabilities(
-        chat=True, chat_images=True, image=True, image_edit=True, video=True, renew_session=True
+        chat=True, chat_images=True, image=True, image_edit=True, video=True, renew_session=True,
+        quota=True,
     )
 
     def __init__(self, settings: Settings) -> None:
@@ -102,6 +122,9 @@ class BrowserDriver(MuseDriver):
         self._opening: dict[str, int] = {}
         self._tab_cond = asyncio.Condition()
         self._ctx_lock = asyncio.Lock()
+        # Last quota snapshot per account (see ``quota``) and the lock serialising reads.
+        self._quota_cache: dict[str, dict[str, Any]] = {}
+        self._quota_locks: dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------ lifecycle
     async def startup(self) -> None:
@@ -712,3 +735,112 @@ class BrowserDriver(MuseDriver):
         for tab in idle:
             await self._close_tab(tab)
         return info
+
+    # ------------------------------------------------------------ quota
+    _QUOTA_CLICK_TIMEOUT = 8.0
+    _QUOTA_READ_TIMEOUT = 12.0
+    _ESCAPE_PAUSE = 0.1
+    """Lets the UI finish closing before the next key or click."""
+
+    def forget_quota(self, account_id: str) -> None:
+        """Drop the cached snapshot so the next ``quota`` call reads the page again."""
+        self._quota_cache.pop(account_id, None)
+
+    def _cached_quota(self, account_id: str) -> dict[str, Any] | None:
+        hit = self._quota_cache.get(account_id)
+        if hit and time.time() - hit["fetched_at"] < quota_cache_seconds():
+            return dict(hit)
+        return None
+
+    async def quota(self, account: Account) -> dict[str, Any]:
+        """Read Settings -> Usage on an idle tab of ``account``.
+
+        Returns ``plan``, ``weekly_used_pct``, ``resets_at``, ``extra_left``, ``found``,
+        ``source`` ("browser") and ``fetched_at``. Cached per account for
+        ``MUSE2API_QUOTA_CACHE_S`` (30 min) so the dashboard cannot hammer muse.ai;
+        ``forget_quota`` bypasses it. Raises ``AccountBusy`` rather than touch a tab
+        that is serving a request."""
+        if hit := self._cached_quota(account.id):
+            return hit
+        async with self._quota_locks.setdefault(account.id, asyncio.Lock()):
+            if hit := self._cached_quota(account.id):
+                return hit
+            tab = await self._checkout_idle(account)
+            try:
+                parsed = await self._read_quota(tab)
+            except CDPError as exc:
+                await self._close_tab(tab)
+                raise UpstreamError(f"browser error: {exc}") from exc
+            finally:
+                await self._checkin(tab)
+            snapshot = {**parsed, "source": "browser", "fetched_at": time.time()}
+            self._quota_cache[account.id] = snapshot
+            return dict(snapshot)
+
+    async def _checkout_idle(self, account: Account) -> _Tab:
+        """An idle tab of ``account`` without waiting; a fresh tab only when the account
+        has none open or opening. Raises ``AccountBusy`` when every tab is in use."""
+        async with self._tab_cond:
+            tabs = [t for t in self._tabs.get(account.id, []) if not t.closed]
+            idle = [t for t in tabs if not (t.busy or t.stale or t.session.closed)]
+            if idle:
+                # Prefer a tab without a conversation; the dialog does not navigate anyway.
+                tab = next((t for t in idle if not t.has_state), idle[0])
+                tab.busy = True
+                return tab
+            if any(t.busy for t in tabs) or self._opening.get(account.id):
+                raise AccountBusy(f"account '{account.id}' is serving a request; "
+                                  "try the quota again when it is idle")
+        return await self._checkout(account, prefer=lambda t: not t.has_state)
+
+    async def _click_js(self, tab: _Tab, expr: str) -> bool:
+        """Click the centre of the element ``expr`` locates, waiting for it to appear."""
+        deadline = time.monotonic() + self._QUOTA_CLICK_TIMEOUT
+        while True:
+            pt = await tab.session.evaluate(expr)
+            if isinstance(pt, dict) and "x" in pt and "y" in pt:
+                for kind in ("mousePressed", "mouseReleased"):
+                    await tab.session.send("Input.dispatchMouseEvent", {
+                        "type": kind, "x": pt["x"], "y": pt["y"], "button": "left",
+                        "clickCount": 1})
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.15)
+
+    async def _escape(self, tab: _Tab) -> None:
+        for _ in range(2):
+            for kind in ("keyDown", "keyUp"):
+                await tab.session.send("Input.dispatchKeyEvent", {
+                    "type": kind, "key": "Escape", "code": "Escape",
+                    "windowsVirtualKeyCode": 27, "nativeVirtualKeyCode": 27})
+            await asyncio.sleep(self._ESCAPE_PAUSE)
+
+    async def _read_quota(self, tab: _Tab) -> dict[str, Any]:
+        page = await tab.session.evaluate(dom.PAGE_STATE) or {}
+        if not page.get("hasInput"):  # a fresh tab is still on about:blank
+            await self._new_thread(tab)
+        await self._escape(tab)  # a menu left open would swallow the first click
+        try:
+            if not await self._click_js(tab, dom.QUOTA_SETTINGS_ENTRY):
+                return {**dom.parse_usage_text(""), "error": "settings entry not found"}
+            if not await self._click_js(tab, dom.QUOTA_MENU_ITEM):
+                return {**dom.parse_usage_text(""), "error": "settings menu item not found"}
+            deadline = time.monotonic() + self._QUOTA_READ_TIMEOUT
+            while True:
+                parsed = dom.parse_usage_text(await tab.session.evaluate(dom.QUOTA_DIALOG_TEXT))
+                if parsed["found"] or time.monotonic() >= deadline:
+                    return parsed
+                await asyncio.sleep(0.2)
+        finally:
+            # Never hand a tab back with the dialog open: close it, and retire the
+            # tab when that did not work.
+            try:
+                await self._escape(tab)
+                if await tab.session.evaluate(dom.QUOTA_DIALOG_TEXT):
+                    tab.stale = True
+            except Exception:  # noqa: BLE001
+                tab.stale = True
+            if tab.stale:
+                log.warning("settings dialog stayed open on a tab of %s; retiring it",
+                            tab.account_id)

@@ -1,0 +1,10 @@
+{
+  "extName": {
+    "message": "muse2api Nhập Cookie",
+    "description": "Tên extension"
+  },
+  "extDesc": {
+    "message": "Nhập cookie đăng nhập muse.ai vào gateway muse2api chỉ bằng một cú nhấp. Không cần cài Python hay mở terminal.",
+    "description": "Mô tả extension"
+  }
+}

@@ -64,8 +64,9 @@ The project focuses on **clean engineering and easy collaboration**:
 | Automatic media cleanup | ✅ Implemented | `MUSE2API_MEDIA_RETENTION_DAYS` (default 14, `0` disables); hourly background pruning |
 | SSRF guard for server-side image fetches | ✅ Implemented | Private and loopback URLs are rejected |
 | Web dashboard, request log, multiple API keys | ✅ Implemented | Dashboard at `/dashboard`; key CRUD at `/admin/keys`; per-request log and aggregates |
-| Quota lookup | 🧪 Needs real driver | Mock driver returns a fake snapshot; browser/http drivers are not wired up yet |
-| Cookie import browser extension | 🚧 Reserved | |
+| Quota lookup | ✅ Implemented | Browser driver reads Settings → Usage (plan, weekly %, reset, extra allowance; en / zh-CN / zh-TW) on an idle tab, cached 30 min; mock driver returns a fake snapshot; http driver not wired up |
+| VM wake confirmation | ✅ Implemented | After a wake (keepalive or `/admin/accounts/{id}/renew`) the session is polled until the VM is `RUNNING`; an account whose VM is seen down gets no video for 10 min |
+| Cookie import browser extension | ✅ Implemented | MV3 popup in `src/muse2api/web/extension/`, downloadable from the dashboard |
 | Storage backends (SQLite / Redis) | 🚧 Reserved | Accounts still use a JSON store; the request log is SQLite |
 | Prometheus metrics | 🚧 Reserved | Basic aggregates exist at `/admin/stats` |
 
@@ -277,6 +278,8 @@ curl http://localhost:18610/admin/accounts \
 | GET/POST/PATCH/DELETE | `/admin/accounts[/{id}]` | Account CRUD |
 | POST | `/admin/accounts/import` | Bulk account import with per-entry error reporting |
 | POST | `/admin/accounts/{id}/renew` · `/reset` | Renew session · reset account state |
+| GET | `/admin/accounts/{id}/quota[?refresh=1]` | Quota snapshot (cached 30 min; `refresh=1` reads it again; 409 `account_busy` when every tab is busy) |
+| GET | `/admin/extension.zip` | The cookie-import Chrome extension |
 | GET | `/admin/status` · `/admin/tasks` | Service status · task list |
 | GET/POST/PATCH/DELETE | `/admin/keys[/{id}]` | Client API keys (create returns the key once; PATCH renames / revokes) |
 | GET | `/admin/requests` · `/admin/stats?window=1h\|24h\|7d` | Request log (filters: `key_id`, `account_id`, `status=2xx\|4xx\|5xx`, `path`, `since`, `hide_polls`) · aggregates |
@@ -286,6 +289,23 @@ curl http://localhost:18610/admin/accounts \
 ### Dashboard, API keys and request log
 
 Open `http://localhost:18610/dashboard` and enter the admin key; it is kept in the browser's local storage and sent as a Bearer token to `/admin/*`. The page shows request volume, error rate and latency, the account pool (enable/disable, renew, reset), a live request log, and API key management.
+
+![Dashboard overview](docs/images/dashboard-overview.png)
+
+Each account card shows its quota (usage bar, plan, reset date, age of the reading, with a **Quota** button to read it again), when its session cookie expires, and whether its VM was confirmed running after the last wake. **Import hàng loạt** (bulk import) takes one `label | cookie string` per line.
+
+![Accounts](docs/images/dashboard-accounts.png)
+
+#### Cookie-import extension
+
+The muse.ai session cookies are httpOnly, so page scripts cannot read them; a small Chrome / Edge extension (Manifest V3, in `src/muse2api/web/extension/`) can.
+
+1. On the dashboard's Accounts page, click **Tải extension** (download extension). It downloads `muse2api-extension.zip`, also served at `GET /admin/extension.zip`. Unzip it.
+2. Open `chrome://extensions`, turn on **Developer mode** and click **Load unpacked** on the unzipped folder.
+3. Sign in to [muse.ai](https://muse.ai/) in that browser.
+4. Open the extension popup, enter the gateway URL (e.g. `http://localhost:18610`) and the admin key, optionally a label, and click import.
+
+The extension reads the muse.ai cookies with their expiry and posts them to `POST /admin/accounts`. Its only fixed host permission is `muse.ai`; it asks for the gateway's origin when you save it, and never stores the cookies. See [its README](src/muse2api/web/extension/README.md) for details.
 
 Besides the admin key and `MUSE2API_API_KEY` (still accepted, logged as `legacy`), `/v1/*` accepts any non-revoked key created on the dashboard or with `POST /admin/keys {"name": "..."}`. Keys look like `m2a-...` and are shown once; `data/keys.json` stores only their SHA-256 hash and an 8-character prefix. Every `/v1/*` request (except `/v1/media/*` downloads) is recorded in `data/requests.db` (SQLite) with its key, model, account, status, latency and client IP (`CF-Connecting-IP` / `X-Forwarded-For` aware). Task status polls are flagged so the dashboard and stats can leave them out.
 
@@ -308,6 +328,8 @@ All settings come from environment variables (prefix `MUSE2API_`) or a `.env` fi
 | `MUSE2API_ACCOUNT_MAX_CONCURRENCY` | `1` | Parallel requests per account (browser driver: one tab each); 4 works well |
 | `MUSE2API_CHROMIUM_PATH` | auto-detected | Path to the browser executable |
 | `MUSE2API_KEEPALIVE_ENABLED` | `false` | Periodically renew sessions in the background |
+| `MUSE2API_WAKE_CONFIRM_S` | `20` | Seconds to wait for a woken VM to report `RUNNING` |
+| `MUSE2API_QUOTA_CACHE_S` | `1800` | How long a quota reading is reused before muse.ai is asked again |
 | `MUSE2API_MATTING_MODEL` | `birefnet-general` | Model for `background: "transparent"` (`birefnet-general-lite` is faster) |
 
 ## Roadmap
@@ -315,9 +337,9 @@ All settings come from environment variables (prefix `MUSE2API_`) or a `.env` fi
 All reserved modules and outstanding work are tracked in **[TODO.md](TODO.md)**, in four groups:
 
 - **Verification and live testing (do first)**: get the tests passing, test the browser driver against real accounts, and verify image/video generation and session renewal.
-- **Drivers**: direct HTTP protocol driver, conversation thread reuse, quota lookup.
+- **Drivers**: direct HTTP protocol driver, conversation thread reuse, quota-aware scheduling.
 - **Protocol**: `/v1/responses`, mask-based inpainting, emulated tool calling.
-- **Accounts, admin and operations**: cookie import browser extension, storage backends, per-key rate limits, Prometheus metrics.
+- **Accounts, admin and operations**: storage backends, per-key rate limits, Prometheus metrics.
 
 Each task lists its location, approach and definition of done. Places marked `TODO(contributors)` in the code are the reserved extension points.
 

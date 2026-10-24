@@ -15,6 +15,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..errors import Muse2APIError
+from ..private_files import atomic_private_write, redact_secrets, secure_file_mode
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ class TaskManager:
     async def load(self) -> None:
         if not self.path.is_file():
             return
+        await asyncio.to_thread(secure_file_mode, self.path)
         try:
             items = json.loads(self.path.read_text(encoding="utf-8") or "[]")
         except json.JSONDecodeError:
@@ -65,6 +67,8 @@ class TaskManager:
             return
         for item in items:
             task = Task.model_validate(item)
+            if task.error and task.error.get("message"):
+                task.error["message"] = redact_secrets(str(task.error["message"]))
             if not task.finished:
                 task.status = TaskStatus.FAILED
                 task.error = {"message": "interrupted by server restart", "code": "interrupted"}
@@ -73,13 +77,8 @@ class TaskManager:
     def _persist(self) -> None:
         tasks = sorted(self._tasks.values(), key=lambda t: t.created_at)[-self.max_kept :]
         self._tasks = {t.id: t for t in tasks}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps([t.model_dump(mode="json") for t in tasks], ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(self.path)
+        payload = json.dumps([t.model_dump(mode="json") for t in tasks], ensure_ascii=False)
+        atomic_private_write(self.path, payload, prefix=".tasks.")
 
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
@@ -108,11 +107,11 @@ class TaskManager:
             task.status = TaskStatus.CANCELLED
         except Muse2APIError as exc:
             task.status = TaskStatus.FAILED
-            task.error = {"message": exc.message, "code": exc.code}
+            task.error = {"message": redact_secrets(exc.message), "code": exc.code}
         except Exception as exc:  # noqa: BLE001
-            log.exception("task %s crashed", task.id)
+            log.error("task %s crashed (%s)", task.id, type(exc).__name__)
             task.status = TaskStatus.FAILED
-            task.error = {"message": str(exc), "code": "internal_error"}
+            task.error = {"message": redact_secrets(str(exc)), "code": "internal_error"}
         finally:
             task.updated_at = time.time()
             self._running.pop(task.id, None)
@@ -121,7 +120,7 @@ class TaskManager:
                 try:
                     await self.on_finish(task)
                 except Exception:  # noqa: BLE001
-                    log.exception("on_finish hook failed for task %s", task.id)
+                    log.error("on_finish hook failed for task %s", task.id)
 
     async def cancel(self, task_id: str) -> bool:
         running = self._running.get(task_id)

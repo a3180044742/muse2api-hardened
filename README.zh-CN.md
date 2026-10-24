@@ -59,7 +59,7 @@ muse2api 把 muse.ai 的聊天、文生图和文生视频能力变成标准的 O
 | 会话续期 / 保活 | 🧪 待实测 | 纯 HTTP，默认关闭 |
 | 直连 HTTP 协议 driver | 🚧 预留 | 返回 501 |
 | `/v1/images/edits`（参考图） | ✅ 已实现 | 参考图用于生成新图；不支持 `mask` |
-| `/v1/responses` | 🚧 预留 | 返回 501 |
+| `/v1/responses` | ✅ 文本/SSE；结构化工具需显式开启 | 文本 Responses 已支持。工具仿真默认关闭，开启前必须完成真实 Muse 验证。 |
 | 流式心跳（SSE keepalive） | ✅ 已实现 | 用 `MUSE2API_STREAM_HEARTBEAT_INTERVAL` 开启；等第一个 token 期间发送 `: keepalive` 注释 |
 | 媒体自动清理 | ✅ 已实现 | `MUSE2API_MEDIA_RETENTION_DAYS`（默认 14 天，`0` 关闭）；每小时后台清理 |
 | 服务端图片抓取的 SSRF 防护 | ✅ 已实现 | 拒绝内网和回环地址 |
@@ -169,6 +169,10 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+### 镜像发布与更新
+
+GitHub Actions 会先运行 Ruff 和 Python 3.10/3.12 测试矩阵，再发布 GHCR 镜像。推送到 `main` 会发布 `ghcr.io/www222fff/muse2api:main` 和不可变的 `sha-<commit>` 标签；`v*` 标签会发布对应版本和 commit 标签。部署时固定使用 commit 标签，不使用会移动的 `main`。在仓库外配置 GHCR 包可见性或拉取权限；镜像中不要放账号 Cookie 或 API key。流水线只负责构建发布，不负责直接部署；云端更新器应先拉取候选镜像、执行健康和协议检查，通过后再晋级。
+
 ### 用真实账号（浏览器 driver）
 
 1. 装好 Chromium 或 Chrome，在 `.env` 里设置 `MUSE2API_DRIVER=browser`。
@@ -177,7 +181,7 @@ docker compose up -d --build
 
 ## 接口示例
 
-所有 `/v1/*` 接口都需要请求头 `Authorization: Bearer <API_KEY>`。`/admin/*` 接口用 `MUSE2API_ADMIN_KEY`，没设置时默认和 API key 相同。
+所有 `/v1/*` 接口都需要请求头 `Authorization: Bearer <API_KEY>`。`/admin/*` 接口使用独立配置的 `MUSE2API_ADMIN_KEY`；留空时关闭管理 API。
 
 **聊天（流式）**
 
@@ -281,13 +285,13 @@ curl http://localhost:18610/admin/accounts \
 | GET/POST/PATCH/DELETE | `/admin/keys[/{id}]` | 客户端 API key（创建时只返回一次明文；PATCH 改名/吊销） |
 | GET | `/admin/requests` · `/admin/stats?window=1h\|24h\|7d` | 请求日志（可按 `key_id`、`account_id`、`status=2xx\|4xx\|5xx`、`path`、`since` 过滤，`hide_polls` 隐藏轮询）· 聚合统计 |
 | GET | `/dashboard` | 网页控制台（在浏览器里输入 admin key） |
-| POST | `/v1/responses` | 预留，目前返回 501 |
+| POST | `/v1/responses` | 文本/SSE Responses；`previous_response_id` 和结构化工具续接仅在 `MUSE2API_RESPONSES_TOOLS_ENABLED=true` 时可用 |
 
 ### 控制台、API key 与请求日志
 
-打开 `http://localhost:18610/dashboard` 并输入 admin key；key 存在浏览器的 local storage 里，以 Bearer token 发给 `/admin/*`。页面展示请求量、错误率、延迟、账号池（启用/禁用、续期、重置）、实时请求日志和 API key 管理。
+打开 `http://localhost:18610/dashboard` 并输入 admin key；key 仅保存在当前标签页的 session storage 中，以 Bearer token 发给 `/admin/*`。页面展示请求量、错误率、延迟、账号池（启用/禁用、续期、重置）、实时请求日志和 API key 管理。
 
-除了 admin key 和 `MUSE2API_API_KEY`（仍可用，日志里记为 `legacy`），`/v1/*` 接受任何未被吊销的 key：在控制台或用 `POST /admin/keys {"name": "..."}` 创建。key 长这样 `m2a-...`，只在创建时展示一次；`data/keys.json` 只存它们的 SHA-256 哈希和 8 字符前缀。每个 `/v1/*` 请求（`/v1/media/*` 下载除外）都会记到 `data/requests.db`（SQLite），含 key、模型、账号、状态码、延迟和客户端 IP（识别 `CF-Connecting-IP` / `X-Forwarded-For`）。任务状态轮询会被打标，控制台和统计可以排除它们。
+`/v1/*` 接受 `MUSE2API_API_KEY`（日志里记为 `legacy`）和控制台或 `POST /admin/keys {"name": "..."}` 创建的未吊销 key；独立的 admin key 仅限 `/admin/*`。key 长这样 `m2a-...`，只在创建时展示一次；`data/keys.json` 只存它们的 SHA-256 哈希和 8 字符前缀。每个 `/v1/*` 请求（`/v1/media/*` 下载除外）都会记到 `data/requests.db`（SQLite），含 key、模型、账号、状态码、延迟和客户端 IP（识别 `CF-Connecting-IP` / `X-Forwarded-For`）。任务状态轮询会被打标，控制台和统计可以排除它们。
 
 ## 配置
 
@@ -298,7 +302,7 @@ curl http://localhost:18610/admin/accounts \
 | `MUSE2API_DRIVER` | `mock` | driver：`mock` / `browser` / `http` |
 | `MUSE2API_HOST` · `MUSE2API_PORT` | `127.0.0.1` · `18610` | 监听地址和端口 |
 | `MUSE2API_API_KEY` | 自动生成 | `/v1/*` 接口的 key |
-| `MUSE2API_ADMIN_KEY` | 同 API key | `/admin/*` 接口的 key |
+| `MUSE2API_ADMIN_KEY` | 空（关闭） | `/admin/*` 接口的独立 key |
 | `MUSE2API_REQUEST_LOG_RETENTION_DAYS` | `14` | `data/requests.db` 里保留多少天的请求历史 |
 | `MUSE2API_MEDIA_RETENTION_DAYS` | `14` | `data/media` 里生成的媒体文件保留多少天；`0` 关闭自动清理 |
 | `MUSE2API_STREAM_HEARTBEAT_INTERVAL` | `0` | 等第一个流式 token 期间 SSE `: keepalive` 注释的发送间隔（秒）；`0` 关闭 |
@@ -308,6 +312,8 @@ curl http://localhost:18610/admin/accounts \
 | `MUSE2API_ACCOUNT_MAX_CONCURRENCY` | `1` | 每个账号的并行请求数（browser driver：每请求一个 tab）；4 比较好用 |
 | `MUSE2API_CHROMIUM_PATH` | 自动探测 | 浏览器可执行文件路径 |
 | `MUSE2API_KEEPALIVE_ENABLED` | `false` | 后台定期续期会话 |
+| `MUSE2API_RESPONSES_TOOLS_ENABLED` | `false` | 显式开启基于提示词仿真的结构化工具；真实 Muse 验证前保持关闭 |
+| `MUSE2API_RESPONSES_STATE_TTL` | `900` | 进程内保留 Responses ID 和待处理调用的秒数 |
 | `MUSE2API_MATTING_MODEL` | `birefnet-general` | `background: "transparent"` 用的抠图模型（`birefnet-general-lite` 更快） |
 
 ## 路线图

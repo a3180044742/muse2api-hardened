@@ -337,7 +337,7 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); font-si
   <div class="login-card">
     <div class="wordmark"><span class="glyph">m2a</span><span>muse2api<small>Bảng điều khiển quản trị</small></span></div>
     <h1>Đăng nhập</h1>
-    <p>Nhập admin key (<span class="mono">MUSE2API_ADMIN_KEY</span>). Key được lưu trong local storage của trình duyệt này.</p>
+    <p>Nhập admin key (<span class="mono">MUSE2API_ADMIN_KEY</span>). Key chỉ được giữ trong phiên hiện tại.</p>
     <form id="login-form" autocomplete="on">
       <input type="text" name="username" value="admin" autocomplete="username" hidden>
       <label class="f">Admin key<input type="password" id="login-key" autocomplete="current-password" required></label>
@@ -502,8 +502,8 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); font-si
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
   const store = {
-    get: (k) => { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
-    set: (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch {} },
+    get: (k) => { try { return sessionStorage.getItem(k) || ""; } catch { return ""; } },
+    set: (k, v) => { try { v ? sessionStorage.setItem(k, v) : sessionStorage.removeItem(k); } catch {} },
   };
   const getKey = () => store.get(STORE);
   const setKey = (k) => store.set(STORE, k);

@@ -20,6 +20,8 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
+from ..private_files import redact_secrets, secure_file_mode
+
 log = logging.getLogger(__name__)
 
 # The row being built for the current request. It holds a mutable dict rather than
@@ -94,6 +96,7 @@ class RequestLog:
     def _db(self) -> sqlite3.Connection:
         if self._conn is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            secure_file_mode(self.path)
             conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
@@ -103,12 +106,22 @@ class RequestLog:
             for col, kind in _ADDED_COLUMNS.items():
                 if col not in have:
                     conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {kind}")
+            self._secure_db_files()
             self._conn = conn
         return self._conn
 
+    def _secure_db_files(self) -> None:
+        for path in (self.path, self.path.with_name(self.path.name + "-wal"),
+                     self.path.with_name(self.path.name + "-shm")):
+            secure_file_mode(path)
+
     def _call(self, fn, *args):
         with self._lock:
-            return fn(self._db(), *args)
+            db = self._db()
+            try:
+                return fn(db, *args)
+            finally:
+                self._secure_db_files()
 
     async def open(self) -> None:
         try:
@@ -148,7 +161,8 @@ class RequestLog:
     async def finish_task(self, task_id: str, status: str, finished_at: float,
                           error: str | None = None, account_id: str | None = None) -> None:
         """Write an async task's outcome onto the request that submitted it."""
-        args = (status, finished_at, error, account_id, task_id)
+        args = (status, finished_at, redact_secrets(error) if error else None,
+                account_id, task_id)
 
         def run(db: sqlite3.Connection) -> None:
             if not db.execute(_FINISH_SQL, args).rowcount:
@@ -165,7 +179,8 @@ class RequestLog:
 
     async def backfill_tasks(self, tasks: list[Any]) -> None:
         """Fill in outcomes for submit rows logged before outcomes were recorded."""
-        rows = [(t.status.value, t.updated_at, (t.error or {}).get("message"), None, t.id)
+        rows = [(t.status.value, t.updated_at,
+                 redact_secrets((t.error or {}).get("message", "")) or None, None, t.id)
                 for t in tasks if t.finished]
         if not rows:
             return

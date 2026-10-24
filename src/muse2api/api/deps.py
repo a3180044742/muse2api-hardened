@@ -41,10 +41,6 @@ def require_api_key(request: Request) -> None:
     provided = _bearer(request)
     if not provided:
         raise Unauthorized("invalid or missing API key")
-    # The admin key is a superset of the API key.
-    if _matches(provided, s.admin_key):
-        _identify(request, "admin", "admin")
-        return
     if _matches(provided, s.api_key):
         _identify(request, "legacy", "legacy")
         return

@@ -14,6 +14,7 @@ from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from ..private_files import redact_secrets
 from ..services.request_log import RequestLog, current_record
 
 # Public media downloads are not API calls worth logging.
@@ -43,18 +44,29 @@ def _error_message(body: bytes) -> str | None:
         data = json.loads(body)
     except ValueError:
         text = body.decode("utf-8", "replace").strip()
-        return text[:_MAX_ERROR_LEN] or None
+        return redact_secrets(text, limit=_MAX_ERROR_LEN) or None
     if not isinstance(data, dict):
         return None
     err = data.get("error")
     msg = err.get("message") if isinstance(err, dict) else err or data.get("detail")
-    return str(msg)[:_MAX_ERROR_LEN] if msg else None
+    return redact_secrets(str(msg), limit=_MAX_ERROR_LEN) if msg else None
 
 
 def _sse_error(chunk: bytes) -> str | None:
     """Error event emitted mid-stream (the status is already 200 by then)."""
     for line in chunk.split(b"\n"):
-        if line.startswith(b'data: {"error"'):
+        if not line.startswith(b"data: "):
+            continue
+        try:
+            payload = json.loads(line[6:])
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and payload.get("type") == "response.failed":
+            response = payload.get("response")
+            error = response.get("error") if isinstance(response, dict) else None
+            if isinstance(error, dict):
+                return redact_secrets(str(error.get("message", "")), limit=_MAX_ERROR_LEN)
+        if isinstance(payload, dict) and payload.get("error"):
             return _error_message(line[6:])
     return None
 
@@ -101,7 +113,8 @@ class RequestLogMiddleware:
                 if record["status_code"] >= 400:
                     if len(error_body) < _MAX_ERROR_BODY:
                         error_body.extend(body[: _MAX_ERROR_BODY - len(error_body)])
-                elif record["stream"] and not record.get("error") and b'"error"' in body:
+                elif (record["stream"] and not record.get("error")
+                      and (b'"error"' in body or b'"response.failed"' in body)):
                     record["error"] = _sse_error(body)
             await send(message)
 
@@ -110,7 +123,9 @@ class RequestLogMiddleware:
             await self.app(scope, receive, send_wrapper)
         except Exception as exc:
             record["status_code"] = 500
-            record["error"] = (str(exc) or type(exc).__name__)[:_MAX_ERROR_LEN]
+            record["error"] = redact_secrets(
+                str(exc) or type(exc).__name__, limit=_MAX_ERROR_LEN
+            )
             raise
         finally:
             current_record.reset(token)

@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import tempfile
 from pathlib import Path
 from typing import Protocol
 
+from ..private_files import atomic_private_write, redact_secrets, secure_file_mode
 from .model import Account
 
 
@@ -28,6 +27,7 @@ class JsonAccountStore:
     async def load(self) -> list[Account]:
         if not self.path.is_file():
             return []
+        await asyncio.to_thread(secure_file_mode, self.path)
         raw = await asyncio.to_thread(self.path.read_text, encoding="utf-8")
         if not raw.strip():
             return []
@@ -35,20 +35,17 @@ class JsonAccountStore:
 
     async def save(self, accounts: list[Account]) -> None:
         payload = json.dumps(
-            [a.model_dump(mode="json") for a in accounts], ensure_ascii=False, indent=2
+            [self._private_dump(a) for a in accounts], ensure_ascii=False, indent=2
         )
         async with self._lock:
             await asyncio.to_thread(self._atomic_write, payload)
 
     def _atomic_write(self, payload: str) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".accounts.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(payload)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, self.path)
-        except BaseException:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
+        atomic_private_write(self.path, payload, prefix=".accounts.")
+
+    @staticmethod
+    def _private_dump(account: Account) -> dict:
+        data = account.model_dump(mode="json")
+        if data.get("last_error"):
+            data["last_error"] = redact_secrets(data["last_error"], limit=500)
+        return data

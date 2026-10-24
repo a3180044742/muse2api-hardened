@@ -215,5 +215,5 @@ async def test_quota_hint_only_counts_in_the_finished_reply(driver):
     assert (await driver._state(_media_tab([sidebar])))["tail"] == sidebar["tail"]
     quota = {"tail": "You've reached your usage limit. Try again later.",
              "lastText": "You've reached your usage limit. Try again later.", "generating": False}
-    with pytest.raises(UpstreamQuotaError, match="usage limit"):
+    with pytest.raises(UpstreamQuotaError, match="quota exhausted"):
         await driver._state(_media_tab([quota]))

@@ -209,7 +209,7 @@ class AccountPool:
         acc.last_error = str(error)[:500]
         if isinstance(error, UpstreamAuthError):
             acc.status = AccountStatus.INVALID
-            log.warning("account %s marked invalid: %s", acc.id, error)
+            log.warning("account %s marked invalid (%s)", acc.id, type(error).__name__)
         elif isinstance(error, UpstreamQuotaError):
             acc.status = AccountStatus.COOLING
             acc.cooldown_until = time.time() + max(self.cooldown, 3600)

@@ -54,12 +54,13 @@ def test_keys_require_admin(client, auth):
     assert client.post("/admin/keys", headers=auth, json={"name": "x"}).status_code == 401
 
 
-def test_legacy_and_admin_keys_still_work(client, auth, admin):
+def test_legacy_and_admin_keys_are_isolated(client, auth, admin):
     assert client.get("/v1/models", headers=auth).status_code == 200
-    assert client.get("/v1/models", headers=admin).status_code == 200
+    # Admin credentials are intentionally isolated from the client API.
+    assert client.get("/v1/models", headers=admin).status_code == 401
     assert client.get("/v1/models", headers=_bearer("m2a-nope")).status_code == 401
     names = [r["key_name"] for r in _requests(client, admin)]
-    assert names == [None, "admin", "legacy"]
+    assert names == [None, None, "legacy"]
 
 
 def test_request_logged(client, admin):

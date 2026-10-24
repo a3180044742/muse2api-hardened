@@ -12,14 +12,14 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import secrets
-import tempfile
 import time
 import uuid
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+from ..private_files import atomic_private_write, secure_file_mode
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +60,7 @@ class KeyStore:
     async def load(self) -> None:
         if not self.path.is_file():
             return
+        await asyncio.to_thread(secure_file_mode, self.path)
         raw = await asyncio.to_thread(self.path.read_text, encoding="utf-8")
         if raw.strip():
             self._keys = {k.id: k for k in (ApiKey.model_validate(i) for i in json.loads(raw))}
@@ -120,14 +121,4 @@ class KeyStore:
                 log.exception("failed to write %s", self.path)
 
     def _atomic_write(self, payload: str) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".keys.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(payload)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, self.path)
-        except BaseException:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
+        atomic_private_write(self.path, payload, prefix=".keys.")

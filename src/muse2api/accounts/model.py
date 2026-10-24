@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ..private_files import redact_secrets
+
 
 class AccountStatus(str, Enum):
     ACTIVE = "active"
@@ -50,9 +52,16 @@ class Account(BaseModel):
         return True
 
     def public(self) -> dict[str, Any]:
-        """Serialisable view with cookie values masked."""
+        """Serialisable view with cookies, errors, and private driver metadata removed."""
         data = self.model_dump(mode="json")
         data["cookies"] = {k: _mask(v) for k, v in self.cookies.items()}
+        data["last_error"] = redact_secrets(self.last_error, limit=200) if self.last_error else None
+        # Only expose stable operational fields; VM IDs, URLs, and provider payloads stay private.
+        safe_meta = {"renewed_at", "quota"}
+        data["meta"] = {
+            key: _redact_value(value) if key == "quota" else value
+            for key, value in self.meta.items() if key in safe_meta
+        }
         return data
 
 
@@ -60,3 +69,13 @@ def _mask(value: str) -> str:
     if len(value) <= 8:
         return "***"
     return f"{value[:4]}...{value[-4:]}"
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_secrets(value, limit=200)
+    if isinstance(value, dict):
+        return {str(key): _redact_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    return value

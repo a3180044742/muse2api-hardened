@@ -57,7 +57,8 @@ class Gateway:
                     # Once text reached the client we cannot transparently switch accounts.
                     if emitted or not self._should_retry(exc, attempt, tried):
                         raise
-                    log.warning("chat failed on %s (%s), failing over", lease.account.id, exc)
+                    log.warning("chat failed on %s (%s), failing over", lease.account.id,
+                                type(exc).__name__)
 
     async def _run(self, fn: Callable[[Account], Awaitable[T]], hint: str | None = None) -> T:
         tried: list[str] = []
@@ -70,7 +71,8 @@ class Gateway:
                     tried.append(lease.account.id)
                     if not self._should_retry(exc, attempt, tried):
                         raise
-                    log.warning("call failed on %s (%s), failing over", lease.account.id, exc)
+                    log.warning("call failed on %s (%s), failing over", lease.account.id,
+                                type(exc).__name__)
         raise AssertionError("unreachable")
 
     async def generate_image(self, req: ImageRequest) -> list[MediaResult]:

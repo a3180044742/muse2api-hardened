@@ -239,9 +239,10 @@ def test_responses_stream(client, auth):
     types = [e["type"] for e in events]
     assert types[:4] == ["response.created", "response.in_progress",
                         "response.output_item.added", "response.content_part.added"]
-    assert all(t == "response.output_text.delta" for t in types[4:-2])
+    assert all(t == "response.output_text.delta" for t in types[4:-4])
     assert len(types) > 6
-    assert types[-2:] == ["response.output_item.done", "response.completed"]
+    assert types[-4:] == ["response.output_text.done", "response.content_part.done",
+                           "response.output_item.done", "response.completed"]
     first, last = events[0], events[-1]
     assert first["response"]["status"] == "in_progress"
     assert first["response"]["output"] == []
@@ -252,6 +253,10 @@ def test_responses_stream(client, auth):
     assert "stream me" in text
     seqs = [e["sequence_number"] for e in events]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    continued = client.post("/v1/responses", headers=auth, json={
+        "input": "continue immediately", "previous_response_id": final["id"],
+    })
+    assert continued.status_code == 200
 
 
 def test_responses_rejects_bad_input(client, auth):

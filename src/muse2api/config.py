@@ -10,6 +10,8 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .private_files import atomic_private_write, secure_file_mode
+
 DriverName = Literal["mock", "browser", "http"]
 PoolStrategyName = Literal["round_robin", "lru", "affinity"]
 
@@ -34,7 +36,9 @@ class Settings(BaseSettings):
 
     # --- auth ---
     api_key: str = Field(default="", description="Bearer key for /v1/*. Auto-generated if empty.")
-    admin_key: str = Field(default="", description="Bearer key for /admin/*. Falls back to api_key.")
+    admin_key: str = Field(
+        default="", description="独立的 /admin/* Bearer key; empty disables the admin API."
+    )
 
     # --- storage ---
     data_dir: Path = Path("data")
@@ -69,6 +73,13 @@ class Settings(BaseSettings):
         default=0.0,
         description="SSE ': keepalive' comment interval while waiting for the first "
         "stream token; 0 disables. Keeps idle clients/proxies from timing out.",
+    )
+    # Muse has no native function-calling endpoint. Keep prompt-based tools opt-in.
+    responses_tools_enabled: bool = False
+    responses_state_ttl: float = Field(
+        default=15 * 60,
+        ge=30,
+        description="Seconds to retain Responses IDs and pending tool calls in memory.",
     )
     image_timeout: float = 240.0
     video_timeout: float = 600.0
@@ -122,6 +133,7 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         for d in (self.data_dir, self.media_dir):
             d.mkdir(parents=True, exist_ok=True)
+            d.chmod(0o700)
 
     def resolve_api_key(self) -> str:
         """Return the configured key, or load/generate a persistent one under ``data_dir``."""
@@ -129,19 +141,19 @@ class Settings(BaseSettings):
             return self.api_key
         self.ensure_dirs()
         if self.key_file.is_file():
+            secure_file_mode(self.key_file)
             key = self.key_file.read_text(encoding="utf-8").strip()
             if key:
                 self.api_key = key
                 return key
         key = "m2a-" + secrets.token_urlsafe(24)
-        self.key_file.write_text(key + "\n", encoding="utf-8")
-        self.key_file.chmod(0o600)
+        atomic_private_write(self.key_file, key + "\n", prefix=".api-key.")
         self.api_key = key
         return key
 
     @property
     def effective_admin_key(self) -> str:
-        return self.admin_key or self.api_key
+        return self.admin_key
 
 
 @lru_cache(maxsize=1)

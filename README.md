@@ -59,7 +59,7 @@ The project focuses on **clean engineering and easy collaboration**:
 | Session renewal / keepalive | 🧪 Needs live testing | Plain HTTP, disabled by default |
 | Direct HTTP protocol driver | 🚧 Reserved | Returns 501 |
 | `/v1/images/edits` (reference images) | ✅ Implemented | Images are references for a new image; `mask` is rejected |
-| `/v1/responses` | 🚧 Reserved | Returns 501 |
+| `/v1/responses` | ✅ Text/SSE; structured tools opt-in | Text Responses are supported. Tool emulation is disabled by default and must pass live validation before enabling. |
 | Streaming heartbeats (SSE keepalive) | ✅ Implemented | Opt-in with `MUSE2API_STREAM_HEARTBEAT_INTERVAL`; sends `: keepalive` comments while waiting for the first token |
 | Automatic media cleanup | ✅ Implemented | `MUSE2API_MEDIA_RETENTION_DAYS` (default 14, `0` disables); hourly background pruning |
 | SSRF guard for server-side image fetches | ✅ Implemented | Private and loopback URLs are rejected |
@@ -169,6 +169,10 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+### Image publishing and updates
+
+GitHub Actions runs Ruff and the Python 3.10/3.12 test matrix before publishing an image to GHCR. Pushes to `main` publish `ghcr.io/www222fff/muse2api:main` and an immutable `sha-<commit>` tag; `v*` tags publish the matching release tag and commit tag. Deploy the commit tag, not the moving `main` tag. Configure GHCR package visibility or pull access outside the repository; never put account cookies or API keys in the image. Publishing does not deploy: a cloud updater must pull a candidate, run health and protocol checks, and promote only after they pass.
+
 ### Use a real account (browser driver)
 
 1. Install Chromium or Chrome and set `MUSE2API_DRIVER=browser` in `.env`.
@@ -177,7 +181,7 @@ docker compose up -d --build
 
 ## API examples
 
-Every `/v1/*` endpoint requires the header `Authorization: Bearer <API_KEY>`. The `/admin/*` endpoints use `MUSE2API_ADMIN_KEY`, which defaults to the API key when unset.
+Every `/v1/*` endpoint requires the header `Authorization: Bearer <API_KEY>`. The `/admin/*` endpoints use a separately configured `MUSE2API_ADMIN_KEY`; an empty value disables the admin API.
 
 **Chat (streaming)**
 
@@ -281,13 +285,13 @@ curl http://localhost:18610/admin/accounts \
 | GET/POST/PATCH/DELETE | `/admin/keys[/{id}]` | Client API keys (create returns the key once; PATCH renames / revokes) |
 | GET | `/admin/requests` · `/admin/stats?window=1h\|24h\|7d` | Request log (filters: `key_id`, `account_id`, `status=2xx\|4xx\|5xx`, `path`, `since`, `hide_polls`) · aggregates |
 | GET | `/dashboard` | Web dashboard (asks for the admin key in the browser) |
-| POST | `/v1/responses` | Reserved, currently returns 501 |
+| POST | `/v1/responses` | Text/SSE Responses; `previous_response_id` and structured tool replay are available only with `MUSE2API_RESPONSES_TOOLS_ENABLED=true` |
 
 ### Dashboard, API keys and request log
 
-Open `http://localhost:18610/dashboard` and enter the admin key; it is kept in the browser's local storage and sent as a Bearer token to `/admin/*`. The page shows request volume, error rate and latency, the account pool (enable/disable, renew, reset), a live request log, and API key management.
+Open `http://localhost:18610/dashboard` and enter the admin key; it is kept in session storage for the current browser tab and sent as a Bearer token to `/admin/*`. The page shows request volume, error rate and latency, the account pool (enable/disable, renew, reset), a live request log, and API key management.
 
-Besides the admin key and `MUSE2API_API_KEY` (still accepted, logged as `legacy`), `/v1/*` accepts any non-revoked key created on the dashboard or with `POST /admin/keys {"name": "..."}`. Keys look like `m2a-...` and are shown once; `data/keys.json` stores only their SHA-256 hash and an 8-character prefix. Every `/v1/*` request (except `/v1/media/*` downloads) is recorded in `data/requests.db` (SQLite) with its key, model, account, status, latency and client IP (`CF-Connecting-IP` / `X-Forwarded-For` aware). Task status polls are flagged so the dashboard and stats can leave them out.
+`/v1/*` accepts `MUSE2API_API_KEY` (logged as `legacy`) and any non-revoked key created on the dashboard or with `POST /admin/keys {"name": "..."}`; the independent admin key is restricted to `/admin/*`. Keys look like `m2a-...` and are shown once; `data/keys.json` stores only their SHA-256 hash and an 8-character prefix. Every `/v1/*` request (except `/v1/media/*` downloads) is recorded in `data/requests.db` (SQLite) with its key, model, account, status, latency and client IP (`CF-Connecting-IP` / `X-Forwarded-For` aware). Task status polls are flagged so the dashboard and stats can leave them out.
 
 ## Configuration
 
@@ -298,7 +302,7 @@ All settings come from environment variables (prefix `MUSE2API_`) or a `.env` fi
 | `MUSE2API_DRIVER` | `mock` | Driver: `mock` / `browser` / `http` |
 | `MUSE2API_HOST` · `MUSE2API_PORT` | `127.0.0.1` · `18610` | Listen address and port |
 | `MUSE2API_API_KEY` | auto-generated | Key for `/v1/*` endpoints |
-| `MUSE2API_ADMIN_KEY` | same as API key | Key for `/admin/*` endpoints |
+| `MUSE2API_ADMIN_KEY` | empty (disabled) | Separate key for `/admin/*` endpoints |
 | `MUSE2API_REQUEST_LOG_RETENTION_DAYS` | `14` | Days of request history kept in `data/requests.db` |
 | `MUSE2API_MEDIA_RETENTION_DAYS` | `14` | Days generated media files are kept in `data/media`; `0` disables automatic cleanup |
 | `MUSE2API_STREAM_HEARTBEAT_INTERVAL` | `0` | SSE `: keepalive` comment interval (seconds) while waiting for the first stream token; `0` disables |
@@ -308,6 +312,8 @@ All settings come from environment variables (prefix `MUSE2API_`) or a `.env` fi
 | `MUSE2API_ACCOUNT_MAX_CONCURRENCY` | `1` | Parallel requests per account (browser driver: one tab each); 4 works well |
 | `MUSE2API_CHROMIUM_PATH` | auto-detected | Path to the browser executable |
 | `MUSE2API_KEEPALIVE_ENABLED` | `false` | Periodically renew sessions in the background |
+| `MUSE2API_RESPONSES_TOOLS_ENABLED` | `false` | Opt-in prompt-emulated structured tools; keep off until live Muse validation |
+| `MUSE2API_RESPONSES_STATE_TTL` | `900` | Seconds to retain process-local Responses IDs and pending calls |
 | `MUSE2API_MATTING_MODEL` | `birefnet-general` | Model for `background: "transparent"` (`birefnet-general-lite` is faster) |
 
 ## Roadmap

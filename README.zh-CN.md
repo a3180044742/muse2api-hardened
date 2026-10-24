@@ -64,8 +64,9 @@ muse2api 把 muse.ai 的聊天、文生图和文生视频能力变成标准的 O
 | 媒体自动清理 | ✅ 已实现 | `MUSE2API_MEDIA_RETENTION_DAYS`（默认 14 天，`0` 关闭）；每小时后台清理 |
 | 服务端图片抓取的 SSRF 防护 | ✅ 已实现 | 拒绝内网和回环地址 |
 | 网页控制台、请求日志、多 API key | ✅ 已实现 | 控制台在 `/dashboard`；key 增删改查在 `/admin/keys`；逐请求日志和统计聚合 |
-| 额度查询 | 🧪 待接真 driver | Mock driver 返回假快照；browser/http driver 尚未接入 |
-| Cookie 导入浏览器插件 | 🚧 预留 | |
+| 额度查询 | ✅ 已实现 | 浏览器 driver 在空闲 tab 上读取 Settings → Usage（套餐、本周用量百分比、重置时间、额外额度；支持英文 / 简体 / 繁体界面），缓存 30 分钟；mock driver 返回假快照；http driver 尚未接入 |
+| VM 唤醒确认 | ✅ 已实现 | 唤醒（keepalive 或 `/admin/accounts/{id}/renew`）后轮询会话，直到 VM 报告 `RUNNING`；确认 VM 没起来的账号 10 分钟内不接视频请求 |
+| Cookie 导入浏览器插件 | ✅ 已实现 | MV3 弹窗插件，位于 `src/muse2api/web/extension/`，可在控制台下载 |
 | 存储后端（SQLite / Redis） | 🚧 预留 | 账号仍用 JSON 存储；请求日志已是 SQLite |
 | Prometheus 指标 | 🚧 预留 | `/admin/stats` 已有基础聚合 |
 
@@ -277,6 +278,8 @@ curl http://localhost:18610/admin/accounts \
 | GET/POST/PATCH/DELETE | `/admin/accounts[/{id}]` | 账号增删改查 |
 | POST | `/admin/accounts/import` | 账号批量导入，逐条报错 |
 | POST | `/admin/accounts/{id}/renew` · `/reset` | 会话续期 · 重置账号状态 |
+| GET | `/admin/accounts/{id}/quota[?refresh=1]` | 额度快照（缓存 30 分钟；`refresh=1` 重新读取；账号所有 tab 都在忙时返回 409 `account_busy`） |
+| GET | `/admin/extension.zip` | 下载 cookie 导入 Chrome 插件 |
 | GET | `/admin/status` · `/admin/tasks` | 服务状态 · 任务列表 |
 | GET/POST/PATCH/DELETE | `/admin/keys[/{id}]` | 客户端 API key（创建时只返回一次明文；PATCH 改名/吊销） |
 | GET | `/admin/requests` · `/admin/stats?window=1h\|24h\|7d` | 请求日志（可按 `key_id`、`account_id`、`status=2xx\|4xx\|5xx`、`path`、`since` 过滤，`hide_polls` 隐藏轮询）· 聚合统计 |
@@ -286,6 +289,23 @@ curl http://localhost:18610/admin/accounts \
 ### 控制台、API key 与请求日志
 
 打开 `http://localhost:18610/dashboard` 并输入 admin key；key 存在浏览器的 local storage 里，以 Bearer token 发给 `/admin/*`。页面展示请求量、错误率、延迟、账号池（启用/禁用、续期、重置）、实时请求日志和 API key 管理。
+
+![控制台概览](docs/images/dashboard-overview.png)
+
+每张账号卡片显示额度（用量条、套餐、重置日期、读取时间，点 **Quota** 按钮可重新读取）、会话 cookie 的过期时间，以及上次唤醒后 VM 是否确认在运行。**Import hàng loạt**（批量导入）每行一个 `标签 | cookie 字符串`。
+
+![账号页](docs/images/dashboard-accounts.png)
+
+#### Cookie 导入插件
+
+muse.ai 的会话 cookie 都是 httpOnly，页面脚本读不到；一个小小的 Chrome / Edge 插件（Manifest V3，位于 `src/muse2api/web/extension/`）可以。
+
+1. 在控制台的账号页点 **Tải extension**（下载插件），得到 `muse2api-extension.zip`（也可以直接访问 `GET /admin/extension.zip`），解压。
+2. 打开 `chrome://extensions`，开启**开发者模式**，点**加载已解压的扩展程序**，选择解压后的文件夹。
+3. 在这个浏览器里登录 [muse.ai](https://muse.ai/)。
+4. 打开插件弹窗，填入网关地址（如 `http://localhost:18610`）和 admin key，可选填一个标签，然后点导入。
+
+插件会连同过期时间一起读取 muse.ai 的 cookie，POST 到 `/admin/accounts`。它固定的主机权限只有 `muse.ai`；网关地址的访问权限在保存设置时才申请，cookie 本身从不保存在插件里。详见[插件说明](src/muse2api/web/extension/README.md)。
 
 除了 admin key 和 `MUSE2API_API_KEY`（仍可用，日志里记为 `legacy`），`/v1/*` 接受任何未被吊销的 key：在控制台或用 `POST /admin/keys {"name": "..."}` 创建。key 长这样 `m2a-...`，只在创建时展示一次；`data/keys.json` 只存它们的 SHA-256 哈希和 8 字符前缀。每个 `/v1/*` 请求（`/v1/media/*` 下载除外）都会记到 `data/requests.db`（SQLite），含 key、模型、账号、状态码、延迟和客户端 IP（识别 `CF-Connecting-IP` / `X-Forwarded-For`）。任务状态轮询会被打标，控制台和统计可以排除它们。
 
@@ -308,6 +328,8 @@ curl http://localhost:18610/admin/accounts \
 | `MUSE2API_ACCOUNT_MAX_CONCURRENCY` | `1` | 每个账号的并行请求数（browser driver：每请求一个 tab）；4 比较好用 |
 | `MUSE2API_CHROMIUM_PATH` | 自动探测 | 浏览器可执行文件路径 |
 | `MUSE2API_KEEPALIVE_ENABLED` | `false` | 后台定期续期会话 |
+| `MUSE2API_WAKE_CONFIRM_S` | `20` | 唤醒 VM 后最多等多少秒让它报告 `RUNNING` |
+| `MUSE2API_QUOTA_CACHE_S` | `1800` | 额度读数复用多久（秒），过期后才重新问 muse.ai |
 | `MUSE2API_MATTING_MODEL` | `birefnet-general` | `background: "transparent"` 用的抠图模型（`birefnet-general-lite` 更快） |
 
 ## 路线图
@@ -315,9 +337,9 @@ curl http://localhost:18610/admin/accounts \
 所有预留模块和未完成的工作都在 **[TODO.md](TODO.md)** 里跟踪，分四组：
 
 - **验证与实测（先做）**：把测试跑通、用真实账号测浏览器 driver、验证图片/视频生成和会话续期。
-- **Driver**：直连 HTTP 协议 driver、会话复用降首字延迟、额度查询。
+- **Driver**：直连 HTTP 协议 driver、会话复用降首字延迟、按额度调度账号。
 - **协议层**：`/v1/responses`、mask 局部重绘、仿真 tool calling。
-- **账号、管理与运维**：cookie 导入浏览器插件、存储后端、按 key 限流、Prometheus 指标。
+- **账号、管理与运维**：存储后端、按 key 限流、Prometheus 指标。
 
 每个任务都写了位置、做法和完成标准。代码里标了 `TODO(contributors)` 的地方是预留的扩展点。
 

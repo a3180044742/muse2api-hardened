@@ -175,6 +175,8 @@ GitHub Actions 会先运行 Ruff 和 Python 3.10/3.12 测试矩阵，再发布 G
 
 定时的 `Check upstream Muse updates` 工作流会比较本分支与上游 `main`，发现上游前进时创建或更新审查 issue。它不会自动合并或部署上游代码；仍需先审查并通过常规测试和不可变镜像门禁。
 
+Dependabot 还会每周检查 Python 和 GitHub Actions 依赖。每个依赖 PR 仍需通过相同的测试、固定 digest 发布和云端健康门禁流程。
+
 ### 用真实账号（浏览器 driver）
 
 1. 装好 Chromium 或 Chrome，在 `.env` 里设置 `MUSE2API_DRIVER=browser`。

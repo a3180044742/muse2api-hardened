@@ -175,6 +175,8 @@ GitHub Actions runs Ruff and the Python 3.10/3.12 test matrix before publishing 
 
 The scheduled `Check upstream Muse updates` workflow compares this branch with upstream `main` and opens or updates a review issue when upstream advances. It never merges or deploys upstream code; review and the normal test and pinned-image gates remain required.
 
+Dependabot also checks Python and GitHub Actions dependencies weekly. Every dependency PR still goes through the same tests, image digest publication, and cloud health-gated promotion path.
+
 ### Use a real account (browser driver)
 
 1. Install Chromium or Chrome and set `MUSE2API_DRIVER=browser` in `.env`.

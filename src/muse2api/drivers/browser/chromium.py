@@ -84,7 +84,10 @@ class ChromiumProcess:
             args.insert(1, f"--proxy-server={self.proxy}")
         if self.headless:
             args[1:1] = ["--headless=new", "--disable-gpu"]
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
+        # Docker's default seccomp profile blocks the user-namespace operation
+        # Chromium needs for its setuid sandbox. The browser is already isolated
+        # in its own container; keep the sandbox for regular host deployments.
+        if hasattr(os, "geteuid") and (os.geteuid() == 0 or Path("/.dockerenv").exists()):
             args.insert(1, "--no-sandbox")
 
         log.info("launching Chromium: %s", self.executable)

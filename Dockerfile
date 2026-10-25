@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends chromium fonts-wqy-zenhei ca-certificates \
+ && apt-get install -y --no-install-recommends chromium chromium-sandbox fonts-wqy-zenhei ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --uid 1000 muse

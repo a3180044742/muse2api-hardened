@@ -1,12 +1,11 @@
 """OpenAI Responses API (``/v1/responses``).
 
 Maps ``input`` / ``instructions`` onto ``flatten_messages`` and reuses
-``Gateway.chat_stream``. Streaming emits the standard Responses events
-(``response.created`` / ``response.output_text.delta`` / ``response.completed``).
-
-muse.ai has no function calling, so tool items (``function_call``,
-``function_call_output``) are rejected with a clear error instead of being
-silently dropped (see C3).
+``Gateway.chat_stream``. Text streaming emits the standard Responses events;
+the bounded response-state store also supports ``previous_response_id`` and
+prompt-emulated function-call replay when ``responses_tools_enabled`` is
+explicitly enabled. The feature remains disabled by default because Muse has
+no native function-calling endpoint and still needs live-account validation.
 """
 
 from __future__ import annotations

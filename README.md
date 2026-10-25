@@ -46,7 +46,7 @@ The project focuses on **clean engineering and easy collaboration**:
 
 ## Status
 
-> **Current**: the mock-driver test suite passes locally (81 tests, no network access) and CI runs on every push to main; the browser driver and the direct-protocol driver still need live testing against a real muse.ai account.
+> **Current**: the candidate suite passes locally (119 passed, 2 skipped, no network access) and CI runs on every push to main; browser/session renewal and direct-protocol live testing still need a real Muse account in the private cloud candidate.
 
 | Module | Status | Notes |
 |---|---|---|

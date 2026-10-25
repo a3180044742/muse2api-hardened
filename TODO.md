@@ -12,7 +12,7 @@ Priorities: **P0** must be done first · **P1** core feature · **P2** better ex
 
 | ID | Task | Priority | Location | Owner | Status |
 |---|---|---|---|---|---|
-| A1 | Install dependencies, get tests and lint passing | P0 | `tests/` | | Done (local; CI runs on push) |
+| A1 | Install dependencies, get tests and lint passing | P0 | `tests/` | | Done (119 passed, 2 skipped; CI runs on push) |
 | A2 | Test the browser driver with real accounts | P0 | `drivers/browser/` | | Not started |
 | A3 | Verify how image/video generation is triggered | P0 | `drivers/browser/driver.py` | | Not started |
 | A4 | Verify session renewal | P0 | `upstream/muse.py` | | Not started |
@@ -23,7 +23,7 @@ Priorities: **P0** must be done first · **P1** core feature · **P2** better ex
 | B3 | Quota lookup | P2 | `MuseDriver.quota` | | Partial (mock done; real-driver lookup open) |
 | C1 | `/v1/responses` endpoint | P1 | `api/routes/responses.py` | | Done (local; verified with the official OpenAI SDK streaming + non-streaming against the mock driver; real-account check pending) |
 | C2 | `/v1/images/edits` endpoint | P1 | `api/routes/images.py` | | Not started |
-| C3 | Emulated tool calling | P2 | `core/prompt.py` | | Not started |
+| C3 | Emulated tool calling | P2 | `api/routes/responses.py`, `services/responses_state.py` | | Partial (opt-in stateful replay implemented; real-account gate open) |
 | C4 | Streaming heartbeats to avoid client timeouts | P2 | `api/routes/chat.py` | | Done |
 | D1 | Support more cookie import formats | P1 | `api/routes/admin.py` | | Done |
 | D2 | Cookie import browser extension | P2 | `extension/` (new) | | Not started |
@@ -117,7 +117,7 @@ Done. A follow-up whose `messages` continue the conversation already on the page
 
 ### C3 Emulated tool calling · P2
 - muse.ai has no native function calling. The idea is to describe the available tools and an output format in the prompt, parse tool calls out of the reply, and convert them to OpenAI's `tool_calls` format.
-- muse.ai may refuse to follow the requested format, so verify feasibility first and ship it behind a config flag that is off by default.
+- muse.ai may refuse to follow the requested format, so keep the bounded stateful adapter behind `MUSE2API_RESPONSES_TOOLS_ENABLED=false` until live feasibility and Codex gates pass. The local mock protocol gate covers first-call, output-only, full-history and `previous_response_id` continuations.
 
 ### C4 Streaming heartbeats to avoid client timeouts · P2
 - Streaming requests wait for the first chunk before responding, which can take up to 45 seconds (`first_token_timeout`). Some clients and reverse proxies time out in the meantime.

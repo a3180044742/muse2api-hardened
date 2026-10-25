@@ -12,18 +12,18 @@ from muse2api.services.tasks import TaskManager
 
 
 def test_redact_secrets_covers_headers_json_and_token_shapes():
+    google_key = "".join(("AIza", "012345678901234567890123456789012345678"))
     message = (
         'Authorization: Bearer abc.def; refresh_token="refresh-secret"; '
         'Authorization: OAuth oauth-secret; Authorization: Api-Key api-secret; '
         'cookie="sid=one; csrf=two" sk-abcdefghijklmnop '
-        'AIza012345678901234567890123456789012345678 '
-        '"authorization":"Bearer json-secret"; authorization=plain-secret'
+        f'{google_key} "authorization":"Bearer json-secret"; authorization=plain-secret'
     )
 
     result = redact_secrets(message)
 
     for secret in ("abc.def", "oauth-secret", "api-secret", "refresh-secret", "sid=one", "csrf=two",
-                   "sk-abcdefghijklmnop", "AIza012345678901234567890123456789012345678"):
+                   "sk-abcdefghijklmnop", google_key):
         assert secret not in result
     assert "json-secret" not in result
     assert "plain-secret" not in result

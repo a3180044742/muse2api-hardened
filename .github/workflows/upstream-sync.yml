@@ -1,0 +1,42 @@
+name: Check upstream Muse updates
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Notify when upstream advances
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_URL: https://github.com/www222fff/muse2api.git
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream main
+          upstream_sha="$(git rev-parse upstream/main)"
+          if git merge-base --is-ancestor "$upstream_sha" HEAD; then
+            echo "Current branch contains upstream $upstream_sha"
+            exit 0
+          fi
+
+          title="Upstream Muse update needs review"
+          body="Upstream main is at $upstream_sha and is not contained in this branch. Review the upstream diff, run CI, and publish a pinned image only after review. This workflow never merges or deploys upstream code."
+          issue="$(gh issue list --state open --limit 100 --json number,title \
+            --jq '.[] | select(.title == "Upstream Muse update needs review") | .number' \
+            | head -n 1)"
+          if [[ -n "$issue" ]]; then
+            gh issue edit "$issue" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

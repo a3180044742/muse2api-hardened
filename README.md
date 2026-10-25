@@ -173,6 +173,8 @@ docker compose up -d --build
 
 GitHub Actions runs Ruff and the Python 3.10/3.12 test matrix before publishing an image to GHCR. Pushes to `main` publish `ghcr.io/www222fff/muse2api:main` and an immutable `sha-<commit>` tag; `v*` tags publish the matching release tag and commit tag. Deploy the commit tag, not the moving `main` tag. Configure GHCR package visibility or pull access outside the repository; never put account cookies or API keys in the image. Publishing does not deploy: a cloud updater must pull a candidate, run health and protocol checks, and promote only after they pass.
 
+The scheduled `Check upstream Muse updates` workflow compares this branch with upstream `main` and opens or updates a review issue when upstream advances. It never merges or deploys upstream code; review and the normal test and pinned-image gates remain required.
+
 ### Use a real account (browser driver)
 
 1. Install Chromium or Chrome and set `MUSE2API_DRIVER=browser` in `.env`.

@@ -173,6 +173,8 @@ docker compose up -d --build
 
 GitHub Actions 会先运行 Ruff 和 Python 3.10/3.12 测试矩阵，再发布 GHCR 镜像。推送到 `main` 会发布 `ghcr.io/www222fff/muse2api:main` 和不可变的 `sha-<commit>` 标签；`v*` 标签会发布对应版本和 commit 标签。部署时固定使用 commit 标签，不使用会移动的 `main`。在仓库外配置 GHCR 包可见性或拉取权限；镜像中不要放账号 Cookie 或 API key。流水线只负责构建发布，不负责直接部署；云端更新器应先拉取候选镜像、执行健康和协议检查，通过后再晋级。
 
+定时的 `Check upstream Muse updates` 工作流会比较本分支与上游 `main`，发现上游前进时创建或更新审查 issue。它不会自动合并或部署上游代码；仍需先审查并通过常规测试和不可变镜像门禁。
+
 ### 用真实账号（浏览器 driver）
 
 1. 装好 Chromium 或 Chrome，在 `.env` 里设置 `MUSE2API_DRIVER=browser`。

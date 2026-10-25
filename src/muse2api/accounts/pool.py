@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import math
 import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Iterable
@@ -23,6 +24,57 @@ from .model import Account, AccountStatus
 from .store import AccountStore
 
 log = logging.getLogger(__name__)
+
+
+WAKE_BLOCK_KIND = "video"
+WAKE_BLOCK_SECONDS = 600
+"""How long an account with an unconfirmed VM wake is skipped for video."""
+
+
+def _kind_blocked_until(acc: Account, kind: str) -> float:
+    blocks = acc.meta.get("kind_blocked_until")
+    if not isinstance(blocks, dict):
+        return 0.0
+    try:
+        value = float(blocks.get(kind, 0.0))
+        return value if math.isfinite(value) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def note_wake(acc: Account, session_meta: dict) -> None:
+    """Record a VM wake result without making the whole account unavailable.
+
+    A failed/unknown wake only defers video, which is the operation most likely to
+    stall on a sleeping workspace.  A confirmed wake removes only the block this
+    helper created; longer blocks from another subsystem remain intact.
+    """
+    ok = session_meta.get("vm_wake_ok")
+    if not isinstance(ok, bool):
+        return
+    now = time.time()
+    blocks: dict[str, float] = {}
+    existing = acc.meta.get("kind_blocked_until")
+    if not isinstance(existing, dict):
+        existing = {}
+    for kind, until in existing.items():
+        try:
+            expires_at = float(until)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(expires_at) and expires_at > now:
+            blocks[str(kind)] = expires_at
+    ours = acc.meta.pop("wake_blocked_until", None)
+    if not ok:
+        until = now + WAKE_BLOCK_SECONDS
+        if blocks.get(WAKE_BLOCK_KIND, 0.0) < until:
+            blocks[WAKE_BLOCK_KIND] = until
+            acc.meta["wake_blocked_until"] = until
+            log.warning("account %s vm wake not confirmed; deferring video for %ds",
+                        acc.id, WAKE_BLOCK_SECONDS)
+    elif ours is not None and blocks.get(WAKE_BLOCK_KIND) == ours:
+        blocks.pop(WAKE_BLOCK_KIND, None)
+    acc.meta["kind_blocked_until"] = blocks
 
 
 # ---------------------------------------------------------------- strategies
@@ -141,11 +193,22 @@ class AccountPool:
         }
 
     # ---- scheduling ----
-    def _candidates(self, exclude: Iterable[str]) -> tuple[list[Account], bool, float | None]:
+    def _kind_blocked(self, kind: str | None, now: float) -> set[str]:
+        """Return accounts deferred for ``kind``; never make a kind unusable."""
+        if kind is None:
+            return set()
+        usable = [a for a in self._accounts.values()
+                  if a.enabled and a.status != AccountStatus.INVALID]
+        blocked = {a.id for a in usable if _kind_blocked_until(a, kind) > now}
+        return set() if len(blocked) == len(usable) else blocked
+
+    def _candidates(
+        self, exclude: Iterable[str], kind: str | None = None
+    ) -> tuple[list[Account], bool, float | None]:
         """Returns (free candidates, whether a usable account is merely busy, and the
         earliest time a cooling account comes back, if any)."""
         now = time.time()
-        excluded = set(exclude)
+        excluded = set(exclude) | self._kind_blocked(kind, now)
         free, busy, back_at = [], False, None
         for acc in self._accounts.values():
             if acc.id in excluded or not acc.enabled or acc.status == AccountStatus.INVALID:
@@ -159,18 +222,21 @@ class AccountPool:
             free.append(acc)
         return free, busy, back_at
 
-    def has_alternative(self, exclude: Iterable[str]) -> bool:
-        """Whether an enabled, valid account exists outside ``exclude`` (busy or cooling counts)."""
-        excluded = set(exclude)
+    def has_alternative(self, exclude: Iterable[str], kind: str | None = None) -> bool:
+        """Whether an enabled, valid account exists outside ``exclude``."""
+        excluded = set(exclude) | self._kind_blocked(kind, time.time())
         return any(a.id not in excluded and a.enabled and a.status != AccountStatus.INVALID
                    for a in self._accounts.values())
 
-    async def acquire(self, *, exclude: Iterable[str] = (), hint: str | None = None) -> Account:
+    async def acquire(
+        self, *, exclude: Iterable[str] = (), hint: str | None = None,
+        kind: str | None = None,
+    ) -> Account:
         exclude = tuple(exclude)
         deadline = time.monotonic() + self.acquire_timeout
         async with self._cond:
             while True:
-                free, busy, back_at = self._candidates(exclude)
+                free, busy, back_at = self._candidates(exclude, kind)
                 if free:
                     acc = self.strategy.choose(free, hint)
                     self._inflight[acc.id] += 1
@@ -224,9 +290,10 @@ class AccountPool:
 
     @asynccontextmanager
     async def lease(
-        self, *, exclude: Iterable[str] = (), hint: str | None = None
+        self, *, exclude: Iterable[str] = (), hint: str | None = None,
+        kind: str | None = None,
     ) -> AsyncIterator[Lease]:
-        acc = await self.acquire(exclude=exclude, hint=hint)
+        acc = await self.acquire(exclude=exclude, hint=hint, kind=kind)
         lease = Lease(acc)
         try:
             yield lease

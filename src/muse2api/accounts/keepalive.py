@@ -15,7 +15,7 @@ import time
 from ..drivers.base import MuseDriver
 from ..errors import FeatureNotImplemented, UpstreamAuthError
 from .model import AccountStatus
-from .pool import AccountPool
+from .pool import AccountPool, note_wake
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +38,9 @@ async def renew_account(pool: AccountPool, driver: MuseDriver, account_id: str) 
     acc.cookie_expires.update(info.cookie_expires)
     acc.meta.update(info.meta)
     acc.meta["renewed_at"] = time.time()
+    note_wake(acc, info.meta)
     await pool.upsert(acc)
-    return {"ok": info.ok, "meta": info.meta}
+    return {"ok": info.ok, "meta": acc.public()["meta"]}
 
 
 async def keepalive_loop(pool: AccountPool, driver: MuseDriver, interval: float) -> None:

@@ -57,11 +57,11 @@ class Account(BaseModel):
         data["cookies"] = {k: _mask(v) for k, v in self.cookies.items()}
         data["last_error"] = redact_secrets(self.last_error, limit=200) if self.last_error else None
         # Only expose stable operational fields; VM IDs, URLs, and provider payloads stay private.
-        safe_meta = {"renewed_at", "quota"}
-        data["meta"] = {
-            key: _redact_value(value) if key == "quota" else value
-            for key, value in self.meta.items() if key in safe_meta
+        safe_meta = {
+            "renewed_at", "quota", "vm_wake_ok", "vm_state_after", "vm_wake_http",
         }
+        safe = {key: value for key, value in self.meta.items() if key in safe_meta}
+        data["meta"] = {key: _public_meta_value(key, value) for key, value in safe.items()}
         return data
 
 
@@ -78,4 +78,19 @@ def _redact_value(value: Any) -> Any:
         return {str(key): _redact_value(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_redact_value(item) for item in value]
+    return value
+
+
+def _public_meta_value(key: str, value: Any) -> Any:
+    if key == "quota":
+        return _redact_value(value)
+    if key == "vm_wake_ok":
+        return value if isinstance(value, bool) else None
+    if key == "vm_state_after":
+        known = {"RUNNING", "SUSPENDED", "STARTING", "STOPPED", "DISABLED"}
+        return value if isinstance(value, str) and value in known else "OTHER"
+    if key == "vm_wake_http":
+        if isinstance(value, str) and (value.isdigit() or value.isalpha()):
+            return value[:32]
+        return None
     return value

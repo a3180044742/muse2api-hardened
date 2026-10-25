@@ -147,6 +147,8 @@ async def delete_account(account_id: str, svc: Services = Depends(get_services))
 async def reset_account(account_id: str, svc: Services = Depends(get_services)) -> dict:
     acc = _get(svc, account_id)
     acc.status, acc.cooldown_until, acc.last_error = AccountStatus.ACTIVE, 0.0, None
+    acc.meta.pop("kind_blocked_until", None)
+    acc.meta.pop("wake_blocked_until", None)
     await svc.pool.upsert(acc)
     return {"account": acc.public()}
 

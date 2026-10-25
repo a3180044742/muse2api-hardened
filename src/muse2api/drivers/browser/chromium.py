@@ -22,6 +22,7 @@ _CANDIDATES = (
     "/snap/bin/chromium",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 )
+_IN_DOCKER = os.path.exists("/.dockerenv")
 
 
 def find_chromium(configured: str = "") -> str:
@@ -87,7 +88,7 @@ class ChromiumProcess:
         # Docker's default seccomp profile blocks the user-namespace operation
         # Chromium needs for its setuid sandbox. The browser is already isolated
         # in its own container; keep the sandbox for regular host deployments.
-        if hasattr(os, "geteuid") and (os.geteuid() == 0 or Path("/.dockerenv").exists()):
+        if hasattr(os, "geteuid") and (os.geteuid() == 0 or _IN_DOCKER):
             args.insert(1, "--no-sandbox")
 
         log.info("launching Chromium: %s", self.executable)

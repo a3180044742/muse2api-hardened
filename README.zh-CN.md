@@ -288,12 +288,17 @@ curl http://localhost:18610/admin/accounts \
 | GET | `/admin/status` · `/admin/tasks` | 服务状态 · 任务列表 |
 | GET/POST/PATCH/DELETE | `/admin/keys[/{id}]` | 客户端 API key（创建时只返回一次明文；PATCH 改名/吊销） |
 | GET | `/admin/requests` · `/admin/stats?window=1h\|24h\|7d` | 请求日志（可按 `key_id`、`account_id`、`status=2xx\|4xx\|5xx`、`path`、`since` 过滤，`hide_polls` 隐藏轮询）· 聚合统计 |
+| GET | `/admin/extension.zip` | 下载 cookie 导入扩展（需要 admin key） |
 | GET | `/dashboard` | 网页控制台（在浏览器里输入 admin key） |
 | POST | `/v1/responses` | 文本/SSE Responses；`previous_response_id` 和结构化工具续接仅在 `MUSE2API_RESPONSES_TOOLS_ENABLED=true` 时可用 |
 
 ### 控制台、API key 与请求日志
 
 打开 `http://localhost:18610/dashboard` 并输入 admin key；key 仅保存在当前标签页的 session storage 中，以 Bearer token 发给 `/admin/*`。页面展示请求量、错误率、延迟、账号池（启用/禁用、续期、重置）、实时请求日志和 API key 管理。
+
+#### Cookie 导入扩展
+
+已通过管理员认证的控制台可从 `/admin/extension.zip` 下载 Chrome/Edge 扩展。解压并以“加载已解压的扩展程序”安装后，在同一个浏览器登录 Muse，填写网关地址和 admin key 即可导入会话。`hatch_gw` 可选，其余当前会话 cookie 必须齐全。扩展不会保存 cookie。远程网关必须使用 HTTPS；HTTP 仅允许 localhost，且读取 cookie 前会拒绝含 URL 用户名、密码、查询参数或片段的地址。
 
 `/v1/*` 接受 `MUSE2API_API_KEY`（日志里记为 `legacy`）和控制台或 `POST /admin/keys {"name": "..."}` 创建的未吊销 key；独立的 admin key 仅限 `/admin/*`。key 长这样 `m2a-...`，只在创建时展示一次；`data/keys.json` 只存它们的 SHA-256 哈希和 8 字符前缀。每个 `/v1/*` 请求（`/v1/media/*` 下载除外）都会记到 `data/requests.db`（SQLite），含 key、模型、账号、状态码、延迟和客户端 IP（识别 `CF-Connecting-IP` / `X-Forwarded-For`）。任务状态轮询会被打标，控制台和统计可以排除它们。
 

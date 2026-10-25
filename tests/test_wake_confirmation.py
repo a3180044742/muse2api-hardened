@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import time
+
 import httpx
 import pytest
 
 from muse2api.accounts import Account, AccountPool, JsonAccountStore
-from muse2api.accounts.pool import note_wake
+from muse2api.accounts.pool import WAKE_BLOCK_SECONDS, note_wake
+from muse2api.drivers.mock import MockDriver
+from muse2api.services.gateway import Gateway
 from muse2api.upstream import muse
 
 COOKIES = {
@@ -185,4 +189,129 @@ def test_malformed_wake_outcome_does_not_clear_or_create_block():
     account = Account(id="a0", meta={"kind_blocked_until": {"video": 9999999999}})
     note_wake(account, {"vm_wake_ok": "false"})
     assert account.meta["kind_blocked_until"]["video"] == 9999999999
+
+
+async def test_never_running_is_not_confirmed_and_stops_at_deadline(scripted_upstream):
+    scripted_upstream["sessions"] = [_session("SUSPENDED")]
+    clock = FakeClock()
+    info = await muse.renew_session(
+        dict(COOKIES), confirm_s=6, poll_s=2, sleep=clock.sleep, clock=clock,
+    )
+    assert info.meta["vm_wake_ok"] is False
+    assert info.meta["vm_state_after"] == "SUSPENDED"
+    assert clock.now <= 6
+    assert scripted_upstream["gets"] == 5
+
+
+@pytest.mark.parametrize("failure", [
+    httpx.Response(503, text="busy"),
+    httpx.ConnectError("connection reset"),
+])
+async def test_transient_confirmation_errors_leave_wake_unknown(scripted_upstream, failure):
+    scripted_upstream["sessions"] = [_session("SUSPENDED"), failure]
+    info = await muse.renew_session(dict(COOKIES), confirm_s=4, poll_s=2)
+    assert info.ok
+    assert info.meta["vm_wake_ok"] is None
+    assert info.meta["vm_state_after"] is None
+
+
+async def test_confirmation_continues_after_error_until_running(scripted_upstream):
+    scripted_upstream["sessions"] = [
+        _session("SUSPENDED"), httpx.Response(502), _session("RUNNING"),
+    ]
+    info = await muse.renew_session(dict(COOKIES), confirm_s=10, poll_s=2)
+    assert info.meta["vm_wake_ok"] is True
+    assert info.meta["vm_state_after"] == "RUNNING"
+
+
+async def test_wake_http_status_does_not_override_confirmed_running(scripted_upstream):
+    scripted_upstream["sessions"] = [_session("RUNNING")]
+    scripted_upstream["wake"] = httpx.Response(403, json={"error": "already running"})
+    info = await muse.renew_session(dict(COOKIES), confirm_s=20)
+    assert info.meta["vm_wake_http"] == "403"
+    assert info.meta["vm_wake_ok"] is True
+
+
+async def test_rejected_wake_on_stopped_vm_is_not_confirmed(scripted_upstream):
+    scripted_upstream["sessions"] = [_session("SUSPENDED")]
+    scripted_upstream["wake"] = httpx.Response(403, json={"error": "forbidden"})
+    info = await muse.renew_session(dict(COOKIES), confirm_s=4, poll_s=2)
+    assert info.meta["vm_wake_ok"] is False
+    assert info.meta["vm_state_after"] == "SUSPENDED"
+
+
+async def test_no_wake_is_attempted_without_a_vm(scripted_upstream):
+    scripted_upstream["sessions"] = [httpx.Response(200, json={"status": "assigned"})]
+    info = await muse.renew_session(dict(COOKIES))
+    assert "vm_wake_ok" not in info.meta
+    assert scripted_upstream["posts"] == 0
+
+
+async def test_video_wake_block_does_not_replace_a_longer_block(tmp_path):
+    pool = AccountPool(JsonAccountStore(tmp_path / "accounts.json"), acquire_timeout=0.2)
+    account = Account(id="a0", cookies=dict(COOKIES))
+    longer = time.time() + 12 * 3600
+    account.meta["kind_blocked_until"] = {"video": longer}
+    await pool.upsert(account)
+    note_wake(account, {"vm_wake_ok": False})
+    note_wake(account, {"vm_wake_ok": True})
+    assert account.meta["kind_blocked_until"]["video"] == longer
+
+
+async def test_renewal_without_wake_preserves_existing_block(tmp_path):
+    pool = AccountPool(JsonAccountStore(tmp_path / "accounts.json"), acquire_timeout=0.2)
+    account = Account(id="a0", cookies=dict(COOKIES))
+    await pool.upsert(account)
+    note_wake(account, {"vm_wake_ok": False})
+    before = dict(account.meta["kind_blocked_until"])
+    note_wake(account, {"session_status": "assigned"})
+    assert account.meta["kind_blocked_until"] == before
+    assert time.time() + WAKE_BLOCK_SECONDS - 5 < before["video"]
+
+
+async def test_video_routing_falls_back_when_every_account_is_blocked(tmp_path):
+    pool = AccountPool(JsonAccountStore(tmp_path / "accounts.json"), acquire_timeout=0.2)
+    for account_id in ("a0", "a1"):
+        account = Account(id=account_id, cookies=dict(COOKIES))
+        note_wake(account, {"vm_wake_ok": False})
+        await pool.upsert(account)
+    lease = await pool.acquire(kind="video")
+    assert lease.id in {"a0", "a1"}
+    await pool.release(lease)
+
+
+async def test_gateway_routes_video_around_an_unconfirmed_account(tmp_path):
+    pool = AccountPool(JsonAccountStore(tmp_path / "accounts.json"), acquire_timeout=0.2)
+    for account_id in ("a0", "a1"):
+        await pool.upsert(Account(id=account_id, cookies=dict(COOKIES)))
+    note_wake(pool.get("a0"), {"vm_wake_ok": False})
+    gateway = Gateway(pool, MockDriver())
+
+    async def which(account: Account) -> str:
+        return account.id
+
+    for _ in range(3):
+        assert await gateway._run(which, kind="video") == "a1"
+    assert {await gateway._run(which) for _ in range(4)} == {"a0", "a1"}
+
+
+async def test_admin_reports_wake_state_and_reset_clears_block(client, admin):
+    response = client.post(
+        "/admin/accounts", headers=admin,
+        json={"cookies": {"hatch_sess": "fixture-session"}},
+    )
+    account_id = response.json()["account"]["id"]
+    pool = client.app.state.services.pool
+    account = pool.get(account_id)
+    account.meta.update({"vm_wake_ok": False, "vm_state_after": "SUSPENDED"})
+    note_wake(account, account.meta)
+    listed = next(
+        item["meta"] for item in client.get("/admin/accounts", headers=admin).json()["data"]
+        if item["id"] == account_id
+    )
+    assert listed["vm_wake_ok"] is False
+    assert "kind_blocked_until" not in listed
+    assert account.meta["kind_blocked_until"]["video"] > time.time()
+    client.post(f"/admin/accounts/{account_id}/reset", headers=admin)
+    assert "kind_blocked_until" not in pool.get(account_id).meta
 

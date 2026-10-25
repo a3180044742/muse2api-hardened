@@ -238,6 +238,18 @@ tr.builtin td:first-child b { font-family: var(--mono); font-size: 12.5px; }
 .s-quota .reason, .s-cooling .reason { background: var(--panel-2); color: var(--muted); }
 .acc-actions { display: flex; gap: 6px; padding: 9px 14px 10px 16px; border-top: 1px solid var(--border); margin-top: auto; flex-wrap: wrap; }
 .acc-actions .spacer { flex: 1; }
+/* quota + expiry + bulk-import */
+.quota-bar { margin: 0 14px 10px 16px; }
+.quota-bar .qrail { height: 6px; background: var(--panel-3); border-radius: 3px; overflow: hidden; }
+.quota-bar .qrail b { display: block; height: 100%; background: var(--bar); border-radius: 3px; transition: width .3s; }
+.quota-bar .qrail b.high { background: var(--warn-line); }
+.quota-bar .qrail b.full { background: var(--bar-err); }
+.quota-bar .qmeta { display: flex; justify-content: space-between; margin-top: 3px; font-size: 11.5px; color: var(--muted); font-family: var(--mono); overflow: hidden; }
+.quota-bar .qmeta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cookie-exp { margin: 0 14px 8px 16px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.bulk-import { margin-top: 18px; }
+.bulk-import textarea { width: 100%; min-height: 84px; font-size: 12px; resize: vertical; }
+.bulk-import .result { margin-top: 8px; font-size: 12.5px; white-space: pre-wrap; font-family: var(--mono); }
 .switch { position: relative; width: 34px; height: 20px; flex: none; margin-top: 1px; }
 .switch input { opacity: 0; width: 0; height: 0; position: absolute; }
 .switch span { position: absolute; inset: 0; background: var(--border-strong); border-radius: 10px; cursor: pointer; transition: background .15s; }
@@ -410,10 +422,24 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); font-si
       <section class="page" id="page-accounts" hidden>
         <div class="page-head">
           <div class="grow"><h1>Accounts</h1><div class="sub">Các tài khoản muse.ai trong pool. Account hết quota sẽ tự quay lại khi hết thời gian nghỉ.</div></div>
-          <div class="tools"><button class="btn" id="acc-refresh" type="button"><svg class="i"><use href="#i-refresh"/></svg>Làm mới</button></div>
+          <div class="tools">
+            <button class="btn" id="acc-refresh" type="button"><svg class="i"><use href="#i-refresh"/></svg>Làm mới</button>
+            <button class="btn" id="acc-ext-dl" type="button" title="Tải extension Chrome để import cookie muse.ai"><svg class="i" viewBox="0 0 24 24"><path d="M12 15l-4-4h3V4h2v7h3l-4 4z"/><path d="M5 18h14v2H5z"/></svg>Tải extension</button>
+            <button class="btn" id="acc-bulk-toggle" type="button" title="Import nhiều cookie cùng lúc">Import hàng loạt</button>
+          </div>
         </div>
         <div class="summary" id="acc-summary"></div>
         <div class="cards" id="accounts"></div>
+        <div class="bulk-import panel pad" id="bulk-import" hidden>
+          <h2 style="margin-top:0">Import cookie hàng loạt</h2>
+          <p style="font-size:13px;color:var(--muted);margin:0 0 10px">Dán cookie string vào đây (một account mỗi dòng, định dạng <span class="mono">tên | hatch_sess=...; hatch_gw=...;</span> hoặc chỉ chuỗi cookie). POST tới <span class="mono">/admin/accounts/import</span>.</p>
+          <textarea id="bulk-cookies" placeholder="acc-01 | hatch_sess=...; hatch_gw=...; hatch_vml=...&#10;acc-02 | hatch_sess=...; hatch_gw=...;"></textarea>
+          <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+            <button class="btn primary" id="bulk-import-btn" type="button">Import</button>
+            <button class="btn ghost" id="bulk-cancel-btn" type="button">Đóng</button>
+            <span id="bulk-result" class="result" hidden></span>
+          </div>
+        </div>
       </section>
 
       <!-- keys -->
@@ -728,6 +754,52 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); font-si
     return {key: "active", label: "hoạt động", cls: "ok", badge: "b-ok"};
   }
 
+  // ---- quota & expiry helpers ----
+  function quotaSection(a) {
+    const q = a.meta && a.meta.quota;
+    if (!q) return "";
+    let pct = null, plan = null, resetsAt = null;
+    if (q.weekly_used_pct != null) {
+      pct = q.weekly_used_pct; plan = q.plan; resetsAt = q.resets_at;
+    } else if (q.messages_used != null && q.messages_limit) {
+      pct = Math.round(q.messages_used / q.messages_limit * 100);
+      plan = q.plan; resetsAt = q.resets_at;
+    } else if (q.plan) {
+      plan = q.plan; resetsAt = q.resets_at;
+    }
+    if (pct == null && !plan) return "";
+    const barCls = pct != null && pct >= 100 ? "full" : pct != null && pct >= 80 ? "high" : "";
+    const barW = pct != null ? Math.min(100, pct) : 0;
+    const planStr = plan ? esc(plan.replace(/\s*plan\s*$/i, "")) : "—";
+    const resetStr = resetsAt
+      ? (typeof resetsAt === "string" ? esc(resetsAt.slice(0, 10)) : esc(clock(resetsAt)))
+      : "—";
+    const agoStr = q.checked_at ? " · " + ago(q.checked_at) : "";
+    const pctStr = pct != null ? ` · ${pct}%` : "";
+    return `<div class="quota-bar" title="Quota${plan ? ": " + plan : ""}${pct != null ? ", đã dùng " + pct + "%" : ""}${resetsAt ? ", reset: " + resetStr : ""}">
+      <div class="qrail"><b class="${barCls}" style="width:${barW}%"></b></div>
+      <div class="qmeta"><span>${planStr}${pctStr}</span><span>reset ${resetStr}${agoStr}</span></div>
+    </div>`;
+  }
+
+  function expirySection(a) {
+    const exp = a.cookie_expires;
+    if (!exp || !Object.keys(exp).length) return "";
+    const ts = exp["hatch_vml"] != null ? exp["hatch_vml"]
+      : Math.min(...Object.values(exp));
+    const left = ts - now();
+    const days = left / 86400;
+    let cls, txt;
+    if (left <= 0) { cls = "b-err"; txt = "Cookie hết hạn"; }
+    else if (days < 1) { cls = "b-err"; txt = `Hết hạn sau ${Math.max(1, Math.floor(left / 3600))} giờ`; }
+    else if (days < 3) { cls = "b-warn"; txt = `Còn ${days.toFixed(1)} ngày`; }
+    else { cls = "b-mute"; txt = `Còn ${Math.round(days)} ngày`; }
+    return `<div class="cookie-exp" title="Cookie hết hạn: ${esc(fullTime(ts))}">
+      <span class="badge plain ${cls}">${txt}</span>
+      <span>hết hạn ${esc(clock(ts))}</span>
+    </div>`;
+  }
+
   function accountCard(a) {
     const t = now(), s = accState(a, t);
     const cooling = s.key === "quota" || s.key === "cooling";
@@ -750,11 +822,18 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); font-si
           <span class="t" data-until="${esc(a.cooldown_until)}">${esc(countdown(a.cooldown_until - t))}</span>
           <span class="w"><b>${s.key === "quota" ? "Hết quota" : "Tạm nghỉ"}</b>Tự động dùng lại lúc ${esc(new Date(a.cooldown_until * 1000).toLocaleTimeString([], {hour12: false}))}</span>
         </div>` : ""}
+      ${quotaSection(a)}
+      ${expirySection(a)}
+      ${a.meta && a.meta.vm_wake_ok != null ? `<div class="cookie-exp" title="VM wake: ${esc(a.meta.vm_state_after || "")}">
+        <span class="badge plain ${a.meta.vm_wake_ok ? "b-ok" : "b-err"}">VM ${a.meta.vm_wake_ok ? "running" : "wake failed"}</span>
+        ${a.meta.vm_state_after ? `<span>${esc(a.meta.vm_state_after)}</span>` : ""}
+      </div>` : ""}
       ${a.last_error ? `<div class="reason" title="last_error">${esc(a.last_error)}</div>` : ""}
       <div class="acc-actions">
         ${state.capabilities.renew_session ? `<button class="btn sm" type="button" data-act="renew">Gia hạn</button>` : ""}
         <button class="btn sm" type="button" data-act="reset" ${s.key === "active" && !a.last_error ? "disabled" : ""} title="Xoá cooldown và lỗi, đưa về trạng thái hoạt động">Đặt lại</button>
         <button class="btn sm ghost" type="button" data-act="requests">Requests</button>
+        <button class="btn sm ghost" type="button" data-act="quota" title="Lấy quota mới nhất từ browser driver">Quota</button>
         <span class="spacer"></span>
         <button class="btn sm danger" type="button" data-act="delete">Xoá</button>
       </div>
@@ -795,6 +874,22 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); font-si
     const a = state.accounts.find((x) => x.id === id);
     const act = btn.dataset.act;
     if (act === "requests") return go("requests", {account: id});
+    if (act === "quota") {
+      btn.disabled = true;
+      const origText = btn.textContent;
+      btn.textContent = "…";
+      guarded(async () => {
+        try {
+          const res = await api(`/admin/accounts/${encodeURIComponent(id)}/quota?refresh=1`);
+          const q = res.quota || {};
+          const pct = q.weekly_used_pct != null ? q.weekly_used_pct
+            : (q.messages_limit ? Math.round(q.messages_used / q.messages_limit * 100) : null);
+          toast(`Quota ${q.plan || "?"}: ${pct != null ? pct + "% đã dùng" : "—"}`);
+          await loadAccountsPage();
+        } finally { btn.disabled = false; btn.textContent = origText; }
+      });
+      return;
+    }
     guarded(async () => {
       const path = `/admin/accounts/${encodeURIComponent(id)}`;
       if (act === "delete") {
@@ -814,6 +909,52 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); font-si
     });
   });
   $("#acc-refresh").addEventListener("click", () => guarded(loadAccountsPage));
+
+  $("#acc-ext-dl").addEventListener("click", () => guarded(async () => {
+    const btn = $("#acc-ext-dl");
+    btn.disabled = true;
+    try {
+      const res = await fetch("/admin/extension.zip", {headers: {Authorization: `Bearer ${getKey()}`}});
+      if (res.status === 404) { toast("Server này không kèm extension"); return; }
+      if (!res.ok) { toast(`Lỗi tải extension: HTTP ${res.status}`); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = "muse2api-cookie-extension.zip";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } finally { btn.disabled = false; }
+  }));
+
+  function showBulkImport(show) {
+    $("#bulk-import").hidden = !show;
+    if (show) { $("#bulk-cookies").value = ""; $("#bulk-result").hidden = true; $("#bulk-cookies").focus(); }
+  }
+  $("#acc-bulk-toggle").addEventListener("click", () => showBulkImport($("#bulk-import").hidden));
+
+  $("#bulk-cancel-btn").addEventListener("click", () => showBulkImport(false));
+  $("#bulk-import-btn").addEventListener("click", () => guarded(async () => {
+    const raw = $("#bulk-cookies").value.trim();
+    if (!raw) return;
+    const lines = raw.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+    const accounts = lines.map((line) => {
+      const m = line.match(/^([^|]+)\|(.+)$/);
+      if (m) return {label: m[1].trim(), cookies: m[2].trim()};
+      return {cookies: line};
+    });
+    const btn = $("#bulk-import-btn");
+    btn.disabled = true;
+    const result = $("#bulk-result");
+    result.textContent = "Đang import…"; result.hidden = false; result.style.color = "var(--muted)";
+    try {
+      const res = await api("/admin/accounts/import", {method: "POST", body: {accounts}});
+      const ok = (res.data || []).filter((r) => r.ok).length;
+      const fail = (res.data || []).filter((r) => !r.ok).length;
+      result.textContent = `✓ ${ok} account import thành công${fail ? ", " + fail + " lỗi" : ""}`;
+      result.style.color = fail ? "var(--warn)" : "var(--ok)";
+      await loadAccountsPage();
+    } finally { btn.disabled = false; }
+  }));
 
   // ---- overview ----
   function tile(k, v, s = "", cls = "") {

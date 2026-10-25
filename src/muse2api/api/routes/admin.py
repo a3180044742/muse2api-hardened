@@ -1,15 +1,19 @@
 """Admin API: account pool management, status, tasks, client keys and the request log.
 
-The ``/dashboard`` page is built on these endpoints; a browser extension for
-one-click cookie import is planned on top of them too (see docs/ARCHITECTURE.md).
+The ``/dashboard`` page is built on these endpoints, and so is the browser
+extension for one-click cookie import (served by ``GET /admin/extension.zip``).
 """
 
 from __future__ import annotations
 
+import io
 import time
+import zipfile
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import Response
 
 from ... import __version__
 from ...accounts.keepalive import renew_account
@@ -22,6 +26,9 @@ from ..deps import get_services, require_admin_key
 from ..schemas import AccountCreate, AccountsImportRequest, AccountUpdate, KeyCreate, KeyUpdate
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin_key)])
+
+EXTENSION_DIR = Path(__file__).resolve().parents[2] / "web" / "extension"
+"""Unpacked extension; it is returned only after admin-key authentication."""
 
 
 def parse_cookies(value: dict[str, str] | str | list[dict]) -> tuple[dict[str, str], dict[str, int]]:
@@ -160,17 +167,39 @@ async def renew(account_id: str, svc: Services = Depends(get_services)) -> dict:
 
 
 @router.get("/accounts/{account_id}/quota")
-async def account_quota(account_id: str, svc: Services = Depends(get_services)) -> dict:
+async def account_quota(account_id: str, refresh: bool = False,
+                        svc: Services = Depends(get_services)) -> dict:
     """Ask the active driver for the account's quota snapshot and persist it in ``meta``.
 
-    Drivers that do not implement ``MuseDriver.quota`` raise
-    ``FeatureNotImplemented``, which the app renders as HTTP 501.
+    The browser driver caches each snapshot; ``refresh=1`` explicitly invalidates
+    that cache. Drivers without quota support return HTTP 501.
     """
     acc = _get(svc, account_id)
+    if refresh and (forget := getattr(svc.driver, "forget_quota", None)):
+        forget(acc.id)
     snapshot = await svc.driver.quota(acc)
     acc.meta["quota"] = {"checked_at": time.time(), **snapshot}
     await svc.pool.upsert(acc)
     return {"account_id": acc.id, "quota": acc.meta["quota"]}
+
+
+@router.get("/extension.zip")
+async def extension_zip() -> Response:
+    """Return a filtered extension archive for an authenticated administrator."""
+    root = EXTENSION_DIR
+    files = sorted(
+        f for f in root.rglob("*")
+        if f.is_file() and not f.is_symlink()
+        and not any(part.startswith(".") for part in f.relative_to(root).parts)
+    ) if root.is_dir() else []
+    if not files:
+        raise NotFound("the browser extension is not bundled with this server")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        for file in files:
+            archive.write(file, f"muse2api-extension/{file.relative_to(root).as_posix()}")
+    return Response(buf.getvalue(), media_type="application/zip", headers={
+        "Content-Disposition": 'attachment; filename="muse2api-extension.zip"'})
 
 
 @router.get("/tasks")

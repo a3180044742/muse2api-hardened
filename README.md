@@ -288,12 +288,19 @@ curl http://localhost:18610/admin/accounts \
 | GET | `/admin/status` · `/admin/tasks` | Service status · task list |
 | GET/POST/PATCH/DELETE | `/admin/keys[/{id}]` | Client API keys (create returns the key once; PATCH renames / revokes) |
 | GET | `/admin/requests` · `/admin/stats?window=1h\|24h\|7d` | Request log (filters: `key_id`, `account_id`, `status=2xx\|4xx\|5xx`, `path`, `since`, `hide_polls`) · aggregates |
+| GET | `/admin/extension.zip` | Download the cookie-import extension (admin key required) |
 | GET | `/dashboard` | Web dashboard (asks for the admin key in the browser) |
 | POST | `/v1/responses` | Text/SSE Responses; `previous_response_id` and structured tool replay are available only with `MUSE2API_RESPONSES_TOOLS_ENABLED=true` |
 
 ### Dashboard, API keys and request log
 
 Open `http://localhost:18610/dashboard` and enter the admin key; it is kept in session storage for the current browser tab and sent as a Bearer token to `/admin/*`. The page shows request volume, error rate and latency, the account pool (enable/disable, renew, reset), a live request log, and API key management.
+
+![Dashboard overview](docs/images/dashboard-overview.png)
+
+#### Cookie-import extension
+
+The authenticated dashboard can download the Chrome/Edge extension from `/admin/extension.zip`. After loading it unpacked and signing in to Muse in the same browser, enter the gateway URL and admin key to import the session. `hatch_gw` is optional; the gateway requires the other current session cookies. Cookies are not saved by the extension. Remote gateways must use HTTPS; plain HTTP is accepted only for localhost, and URL credentials or query strings are rejected before cookies are read.
 
 `/v1/*` accepts `MUSE2API_API_KEY` (logged as `legacy`) and any non-revoked key created on the dashboard or with `POST /admin/keys {"name": "..."}`; the independent admin key is restricted to `/admin/*`. Keys look like `m2a-...` and are shown once; `data/keys.json` stores only their SHA-256 hash and an 8-character prefix. Every `/v1/*` request (except `/v1/media/*` downloads) is recorded in `data/requests.db` (SQLite) with its key, model, account, status, latency and client IP (`CF-Connecting-IP` / `X-Forwarded-For` aware). Task status polls are flagged so the dashboard and stats can leave them out.
 

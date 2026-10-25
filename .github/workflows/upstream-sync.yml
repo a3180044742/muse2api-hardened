@@ -1,39 +1,230 @@
-name: Check upstream Muse updates
+name: Review upstream Muse updates
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "17 3 * * *"
 
-permissions:
-  contents: read
-  issues: write
+# Upstream code is merged and tested without a write-capable token. A separate
+# job publishes only the exact merge commit that passed the full test matrix.
+permissions: {}
 
 jobs:
-  check:
+  plan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      state: ${{ steps.plan.outputs.state }}
+      base_sha: ${{ steps.plan.outputs.base_sha }}
+      upstream_sha: ${{ steps.plan.outputs.upstream_sha }}
+      merge_sha: ${{ steps.plan.outputs.merge_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - name: Notify when upstream advances
+          persist-credentials: false
+
+      - name: Fetch upstream main
         env:
-          GH_TOKEN: ${{ github.token }}
           UPSTREAM_URL: https://github.com/www222fff/muse2api.git
         run: |
           set -euo pipefail
           git remote add upstream "$UPSTREAM_URL"
           git fetch --no-tags upstream main
+
+      - name: Create candidate merge
+        id: plan
+        run: |
+          set -euo pipefail
+          base_sha="$(git rev-parse HEAD)"
           upstream_sha="$(git rev-parse upstream/main)"
+          printf 'base_sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
+          printf 'upstream_sha=%s\n' "$upstream_sha" >> "$GITHUB_OUTPUT"
+
           if git merge-base --is-ancestor "$upstream_sha" HEAD; then
-            echo "Current branch contains upstream $upstream_sha"
+            echo 'state=up-to-date' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          title="Upstream Muse update needs review"
-          body="Upstream main is at $upstream_sha and is not contained in this branch. Review the upstream diff, run CI, and publish a pinned image only after review. This workflow never merges or deploys upstream code."
+          git config user.name 'upstream-sync[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch --create upstream-sync
+          if ! git merge --no-edit --no-ff "$upstream_sha"; then
+            git merge --abort || true
+            echo 'state=conflict' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          merge_sha="$(git rev-parse HEAD)"
+          git update-ref refs/heads/upstream-sync "$merge_sha"
+          printf 'merge_sha=%s\n' "$merge_sha" >> "$GITHUB_OUTPUT"
+          echo 'state=ready' >> "$GITHUB_OUTPUT"
+
+      - name: Export candidate merge
+        if: steps.plan.outputs.state == 'ready'
+        env:
+          BASE_SHA: ${{ steps.plan.outputs.base_sha }}
+        run: git bundle create upstream-sync.bundle refs/heads/upstream-sync "^$BASE_SHA"
+
+      - name: Upload candidate merge
+        if: steps.plan.outputs.state == 'ready'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upstream-sync-${{ steps.plan.outputs.merge_sha }}
+          path: upstream-sync.bundle
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    needs: plan
+    if: needs.plan.outputs.state == 'ready'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: upstream-sync-${{ needs.plan.outputs.merge_sha }}
+
+      - name: Check out tested merge
+        env:
+          BASE_SHA: ${{ needs.plan.outputs.base_sha }}
+          UPSTREAM_SHA: ${{ needs.plan.outputs.upstream_sha }}
+          MERGE_SHA: ${{ needs.plan.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet ./upstream-sync.bundle \
+            refs/heads/upstream-sync:refs/remotes/bundle/upstream-sync
+          test "$(git rev-parse "$MERGE_SHA^1")" = "$BASE_SHA"
+          test "$(git rev-parse "$MERGE_SHA^2")" = "$UPSTREAM_SHA"
+          git checkout --detach "$MERGE_SHA"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install and test
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+          ruff check .
+          pytest -q
+
+  publish:
+    needs: [plan, test]
+    if: needs.plan.outputs.state == 'ready' && needs.test.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.base_sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: upstream-sync-${{ needs.plan.outputs.merge_sha }}
+
+      - name: Publish tested review branch
+        env:
+          BASE_SHA: ${{ needs.plan.outputs.base_sha }}
+          UPSTREAM_SHA: ${{ needs.plan.outputs.upstream_sha }}
+          MERGE_SHA: ${{ needs.plan.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          git fetch --no-tags --quiet ./upstream-sync.bundle \
+            refs/heads/upstream-sync:refs/remotes/bundle/upstream-sync
+          git cat-file -e "$MERGE_SHA^{commit}"
+          test "$(git rev-parse "$MERGE_SHA^1")" = "$BASE_SHA"
+          test "$(git rev-parse "$MERGE_SHA^2")" = "$UPSTREAM_SHA"
+
+          if git ls-remote --exit-code origin refs/heads/upstream-sync >/dev/null 2>&1; then
+            git fetch --no-tags --quiet origin \
+              refs/heads/upstream-sync:refs/remotes/origin/upstream-sync
+            expected="$(git rev-parse refs/remotes/origin/upstream-sync)"
+            git push --force-with-lease="refs/heads/upstream-sync:$expected" \
+              origin "$MERGE_SHA:refs/heads/upstream-sync"
+          else
+            git push --force-with-lease="refs/heads/upstream-sync:" \
+              origin "$MERGE_SHA:refs/heads/upstream-sync"
+          fi
+
+      - name: Create or update review PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ needs.plan.outputs.upstream_sha }}
+          MERGE_SHA: ${{ needs.plan.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          title='Review upstream Muse update'
+          body="Upstream main is at ${UPSTREAM_SHA}. Candidate merge ${MERGE_SHA} passed Ruff and the Python 3.10/3.12 test matrix in the read-only verification jobs. Review this PR before merging; the workflow never auto-merges or deploys upstream code."
+          pr="$(gh pr list --state open --head upstream-sync --base main \
+            --json number --jq '.[0].number' | head -n 1)"
+          if [[ -n "$pr" ]]; then
+            gh pr edit "$pr" --title "$title" --body "$body"
+          else
+            gh pr create --base main --head upstream-sync --title "$title" --body "$body"
+          fi
+
+  report-conflict:
+    needs: plan
+    if: needs.plan.outputs.state == 'conflict'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Create or update conflict issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ needs.plan.outputs.upstream_sha }}
+          BASE_SHA: ${{ needs.plan.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          title='Upstream Muse update needs conflict resolution'
+          body="Upstream main is at ${UPSTREAM_SHA}, while this branch is ${BASE_SHA}. The scheduled sync could not produce a clean merge. Resolve the conflict in a reviewed change, then close this issue. No upstream code was published or deployed."
           issue="$(gh issue list --state open --limit 100 --json number,title \
-            --jq '.[] | select(.title == "Upstream Muse update needs review") | .number' \
+            --jq '.[] | select(.title == "Upstream Muse update needs conflict resolution") | .number' \
+            | head -n 1)"
+          if [[ -n "$issue" ]]; then
+            gh issue edit "$issue" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+
+  report-test-failure:
+    needs: [plan, test]
+    if: always() && needs.plan.outputs.state == 'ready' && needs.test.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Create or update test failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ needs.plan.outputs.upstream_sha }}
+          MERGE_SHA: ${{ needs.plan.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          title='Upstream Muse update failed candidate tests'
+          body="Upstream main is at ${UPSTREAM_SHA}; candidate merge ${MERGE_SHA} failed Ruff or the Python 3.10/3.12 test matrix. Review the workflow run before changing this repository. No upstream code was published or deployed."
+          issue="$(gh issue list --state open --limit 100 --json number,title \
+            --jq '.[] | select(.title == "Upstream Muse update failed candidate tests") | .number' \
             | head -n 1)"
           if [[ -n "$issue" ]]; then
             gh issue edit "$issue" --body "$body"

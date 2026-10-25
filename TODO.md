@@ -20,13 +20,13 @@ Priorities: **P0** must be done first · **P1** core feature · **P2** better ex
 | A6 | Enable GitHub Actions CI | P1 | `.github/workflows/ci.yml` | | Done (workflow file in main) |
 | B1 | Direct HTTP protocol driver | P1 | `drivers/http/` | | Not started |
 | B2 | Reuse conversation threads to cut first-token latency | P2 | `drivers/browser/` | | Done |
-| B3 | Quota lookup | P2 | `MuseDriver.quota` | | Partial (mock done; real-driver lookup open) |
+| B3 | Quota lookup | P2 | `MuseDriver.quota` | | Partial (mock and browser driver done; http driver and quota-aware scheduling open) |
 | C1 | `/v1/responses` endpoint | P1 | `api/routes/responses.py` | | Done (local; verified with the official OpenAI SDK streaming + non-streaming against the mock driver; real-account check pending) |
 | C2 | `/v1/images/edits` endpoint | P1 | `api/routes/images.py` | | Not started |
 | C3 | Emulated tool calling | P2 | `api/routes/responses.py`, `services/responses_state.py` | | Partial (opt-in stateful replay implemented; real-account gate open) |
 | C4 | Streaming heartbeats to avoid client timeouts | P2 | `api/routes/chat.py` | | Done |
 | D1 | Support more cookie import formats | P1 | `api/routes/admin.py` | | Done |
-| D2 | Cookie import browser extension | P2 | `extension/` (new) | | Not started |
+| D2 | Cookie import browser extension | P2 | `web/extension/` | | Done |
 | D3 | Web admin console | P2 | `web/` (new) | | Not started |
 | D4 | SQLite / Redis storage backends | P3 | `accounts/store.py` | | Not started |
 | E1 | Automatic media cleanup | P2 | `core/media.py` | | Done |
@@ -99,6 +99,7 @@ Done. A follow-up whose `messages` continue the conversation already on the page
 - Show quota in `/admin/accounts`, and let scheduling prefer accounts with plenty of quota left.
 - Also declare `quota=True` in `DriverCapabilities` and add a fake implementation to `MockDriver`.
 - **Partially done (2026-10-04)**: `MockDriver` declares `quota=True` and returns a deterministic fake snapshot; `GET /admin/accounts/{id}/quota` persists the snapshot into account meta (visible in `GET /admin/accounts`). Real browser/http driver quota lookup still open.
+- **Browser driver done (2026-10-24)**: `BrowserDriver.quota` reads Settings → Usage on an idle tab (en / zh-CN / zh-TW labels), cached 30 min (`MUSE2API_QUOTA_CACHE_S`); `?refresh=1` bypasses the cache; the dashboard shows it per account. http driver and quota-aware scheduling still open.
 
 ---
 
@@ -136,6 +137,7 @@ Done. A follow-up whose `messages` continue the conversation already on the page
 - Create an `extension/` directory with a Chrome / Edge extension.
 - With one click in a browser that is logged in to muse.ai, it reads all cookies (including HttpOnly cookies that page scripts cannot see, with their expiry times) and pushes them to `/admin/accounts`.
 - Requires handling CORS on the server side.
+- **Done (2026-10-24)**: MV3 popup in `src/muse2api/web/extension/`, served zipped at `GET /admin/extension.zip` and from the dashboard. It posts with the admin key from the extension context, so no CORS change was needed.
 
 ### D3 Web admin console · P2
 - Create a `web/` directory, built on the existing `/admin/*` endpoints.

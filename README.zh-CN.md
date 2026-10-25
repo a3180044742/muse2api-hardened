@@ -176,7 +176,7 @@ GitHub Actions 会先运行 Ruff 和 Python 3.10/3.12 测试矩阵，再发布 G
 ### 用真实账号（浏览器 driver）
 
 1. 装好 Chromium 或 Chrome，在 `.env` 里设置 `MUSE2API_DRIVER=browser`。
-2. 从已登录 muse.ai 的浏览器导出 cookies。至少需要 `hatch_sess`、`hatch_gw`、`hatch_vml` 和 `hatch_native_auth_device`。
+2. 从已登录 muse.ai 的浏览器导出 cookies。需要 `hatch_sess`、`hatch_vml` 和 `hatch_native_auth_device`；存在时会一并传递 `hatch_gw`，但它可以缺省。
 3. 通过下面的 Admin API 示例把账号导进来。
 
 ## 接口示例

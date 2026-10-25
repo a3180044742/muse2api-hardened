@@ -17,6 +17,11 @@ COOKIES = {
 }
 
 
+def test_current_session_cookie_set_does_not_require_optional_gateway_cookie():
+    cookies = {key: value for key, value in COOKIES.items() if key != "hatch_gw"}
+    assert muse.missing_session_cookies(cookies) == []
+
+
 class FakeClock:
     def __init__(self) -> None:
         self.now = 0.0

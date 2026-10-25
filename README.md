@@ -176,7 +176,7 @@ GitHub Actions runs Ruff and the Python 3.10/3.12 test matrix before publishing 
 ### Use a real account (browser driver)
 
 1. Install Chromium or Chrome and set `MUSE2API_DRIVER=browser` in `.env`.
-2. Export the cookies from a browser that is logged in to muse.ai. At least `hatch_sess`, `hatch_gw`, `hatch_vml` and `hatch_native_auth_device` are required.
+2. Export the cookies from a browser that is logged in to muse.ai. `hatch_sess`, `hatch_vml` and `hatch_native_auth_device` are required; `hatch_gw` is forwarded when present but may be absent.
 3. Import the account through the Admin API (see the example below).
 
 ## API examples

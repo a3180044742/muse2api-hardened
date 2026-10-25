@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -123,3 +124,24 @@ def test_compose_publishes_to_loopback_by_default():
 
     assert "${MUSE2API_PUBLISH_HOST:-127.0.0.1}:18610:18610" in compose
     assert "MUSE2API_PUBLISH_HOST=127.0.0.1" in example
+
+
+def test_entrypoint_disables_query_bearing_uvicorn_access_log(monkeypatch):
+    from muse2api import __main__ as entry
+
+    settings = type("Settings", (), {
+        "log_level": "INFO",
+        "host": "127.0.0.1",
+        "port": 18610,
+        "driver": "mock",
+        "key_file": Path("missing-api-key"),
+    })()
+    seen = {}
+    monkeypatch.setattr(entry, "get_settings", lambda: settings)
+    monkeypatch.setattr(entry, "setup_logging", lambda _level: None)
+    monkeypatch.setattr(entry, "create_app", lambda _settings: object())
+    monkeypatch.setattr(entry.uvicorn, "run", lambda _app, **kwargs: seen.update(kwargs))
+
+    entry.main()
+
+    assert seen["access_log"] is False

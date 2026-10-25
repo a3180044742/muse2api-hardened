@@ -46,7 +46,7 @@ The project focuses on **clean engineering and easy collaboration**:
 
 ## Status
 
-> **Current**: the mock-driver test suite passes locally (81 tests, no network access) and CI runs on every push to main; the browser driver and the direct-protocol driver still need live testing against a real muse.ai account.
+> **Current**: the candidate suite passes locally (119 passed, 2 skipped, no network access) and CI runs on every push to main; browser/session renewal and direct-protocol live testing still need a real Muse account in the private cloud candidate.
 
 | Module | Status | Notes |
 |---|---|---|
@@ -59,14 +59,13 @@ The project focuses on **clean engineering and easy collaboration**:
 | Session renewal / keepalive | 🧪 Needs live testing | Plain HTTP, disabled by default |
 | Direct HTTP protocol driver | 🚧 Reserved | Returns 501 |
 | `/v1/images/edits` (reference images) | ✅ Implemented | Images are references for a new image; `mask` is rejected |
-| `/v1/responses` | 🚧 Reserved | Returns 501 |
+| `/v1/responses` | ✅ Text/SSE; structured tools opt-in | Text Responses are supported. Tool emulation is disabled by default and must pass live validation before enabling. |
 | Streaming heartbeats (SSE keepalive) | ✅ Implemented | Opt-in with `MUSE2API_STREAM_HEARTBEAT_INTERVAL`; sends `: keepalive` comments while waiting for the first token |
 | Automatic media cleanup | ✅ Implemented | `MUSE2API_MEDIA_RETENTION_DAYS` (default 14, `0` disables); hourly background pruning |
 | SSRF guard for server-side image fetches | ✅ Implemented | Private and loopback URLs are rejected |
 | Web dashboard, request log, multiple API keys | ✅ Implemented | Dashboard at `/dashboard`; key CRUD at `/admin/keys`; per-request log and aggregates |
-| Quota lookup | ✅ Implemented | Browser driver reads Settings → Usage (plan, weekly %, reset, extra allowance; en / zh-CN / zh-TW) on an idle tab, cached 30 min; mock driver returns a fake snapshot; http driver not wired up |
-| VM wake confirmation | ✅ Implemented | After a wake (keepalive or `/admin/accounts/{id}/renew`) the session is polled until the VM is `RUNNING`; an account whose VM is seen down gets no video for 10 min |
-| Cookie import browser extension | ✅ Implemented | MV3 popup in `src/muse2api/web/extension/`, downloadable from the dashboard |
+| Quota lookup | 🧪 Needs real driver | Mock driver returns a fake snapshot; browser/http drivers are not wired up yet |
+| Cookie import browser extension | 🚧 Reserved | |
 | Storage backends (SQLite / Redis) | 🚧 Reserved | Accounts still use a JSON store; the request log is SQLite |
 | Prometheus metrics | 🚧 Reserved | Basic aggregates exist at `/admin/stats` |
 
@@ -170,15 +169,23 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+### Image publishing and updates
+
+GitHub Actions runs Ruff and the Python 3.10/3.12 test matrix before publishing an image to GHCR. In this hardened fork, pushes to `main` publish `ghcr.io/a3180044742/muse2api-hardened:main` and an immutable `sha-<commit>` tag; `v*` tags publish the matching release tag and commit tag. Deploy the commit digest, not the moving `main` tag. Configure GHCR package visibility or pull access outside the repository; never put account cookies or API keys in the image. Publishing does not deploy: a cloud updater must pull a candidate, run health and protocol checks, and promote only after they pass.
+
+The scheduled `Check upstream Muse updates` workflow compares this branch with upstream `main` and opens or updates a review issue when upstream advances. It never merges or deploys upstream code; review and the normal test and pinned-image gates remain required.
+
+Dependabot also checks Python and GitHub Actions dependencies weekly. Every dependency PR still goes through the same tests, image digest publication, and cloud health-gated promotion path.
+
 ### Use a real account (browser driver)
 
 1. Install Chromium or Chrome and set `MUSE2API_DRIVER=browser` in `.env`.
-2. Export the cookies from a browser that is logged in to muse.ai. At least `hatch_sess`, `hatch_gw`, `hatch_vml` and `hatch_native_auth_device` are required.
+2. Export the cookies from a browser that is logged in to muse.ai. `hatch_sess`, `hatch_vml` and `hatch_native_auth_device` are required; `hatch_gw` is forwarded when present but may be absent.
 3. Import the account through the Admin API (see the example below).
 
 ## API examples
 
-Every `/v1/*` endpoint requires the header `Authorization: Bearer <API_KEY>`. The `/admin/*` endpoints use `MUSE2API_ADMIN_KEY`, which defaults to the API key when unset.
+Every `/v1/*` endpoint requires the header `Authorization: Bearer <API_KEY>`. The `/admin/*` endpoints use a separately configured `MUSE2API_ADMIN_KEY`; an empty value disables the admin API.
 
 **Chat (streaming)**
 
@@ -278,36 +285,24 @@ curl http://localhost:18610/admin/accounts \
 | GET/POST/PATCH/DELETE | `/admin/accounts[/{id}]` | Account CRUD |
 | POST | `/admin/accounts/import` | Bulk account import with per-entry error reporting |
 | POST | `/admin/accounts/{id}/renew` · `/reset` | Renew session · reset account state |
-| GET | `/admin/accounts/{id}/quota[?refresh=1]` | Quota snapshot (cached 30 min; `refresh=1` reads it again; 409 `account_busy` when every tab is busy) |
-| GET | `/admin/extension.zip` | The cookie-import Chrome extension |
 | GET | `/admin/status` · `/admin/tasks` | Service status · task list |
 | GET/POST/PATCH/DELETE | `/admin/keys[/{id}]` | Client API keys (create returns the key once; PATCH renames / revokes) |
 | GET | `/admin/requests` · `/admin/stats?window=1h\|24h\|7d` | Request log (filters: `key_id`, `account_id`, `status=2xx\|4xx\|5xx`, `path`, `since`, `hide_polls`) · aggregates |
+| GET | `/admin/extension.zip` | Download the cookie-import extension (admin key required) |
 | GET | `/dashboard` | Web dashboard (asks for the admin key in the browser) |
-| POST | `/v1/responses` | Reserved, currently returns 501 |
+| POST | `/v1/responses` | Text/SSE Responses; `previous_response_id` and structured tool replay are available only with `MUSE2API_RESPONSES_TOOLS_ENABLED=true` |
 
 ### Dashboard, API keys and request log
 
-Open `http://localhost:18610/dashboard` and enter the admin key; it is kept in the browser's local storage and sent as a Bearer token to `/admin/*`. The page shows request volume, error rate and latency, the account pool (enable/disable, renew, reset), a live request log, and API key management.
+Open `http://localhost:18610/dashboard` and enter the admin key; it is kept in session storage for the current browser tab and sent as a Bearer token to `/admin/*`. The page shows request volume, error rate and latency, the account pool (enable/disable, renew, reset), a live request log, and API key management.
 
 ![Dashboard overview](docs/images/dashboard-overview.png)
 
-Each account card shows its quota (usage bar, plan, reset date, age of the reading, with a **Quota** button to read it again), when its session cookie expires, and whether its VM was confirmed running after the last wake. **Import hàng loạt** (bulk import) takes one `label | cookie string` per line.
-
-![Accounts](docs/images/dashboard-accounts.png)
-
 #### Cookie-import extension
 
-The muse.ai session cookies are httpOnly, so page scripts cannot read them; a small Chrome / Edge extension (Manifest V3, in `src/muse2api/web/extension/`) can.
+The authenticated dashboard can download the Chrome/Edge extension from `/admin/extension.zip`. After loading it unpacked and signing in to Muse in the same browser, enter the gateway URL and admin key to import the session. `hatch_gw` is optional; the gateway requires the other current session cookies. Cookies are not saved by the extension. Remote gateways must use HTTPS; plain HTTP is accepted only for localhost, and URL credentials or query strings are rejected before cookies are read.
 
-1. On the dashboard's Accounts page, click **Tải extension** (download extension). It downloads `muse2api-extension.zip`, also served at `GET /admin/extension.zip`. Unzip it.
-2. Open `chrome://extensions`, turn on **Developer mode** and click **Load unpacked** on the unzipped folder.
-3. Sign in to [muse.ai](https://muse.ai/) in that browser.
-4. Open the extension popup, enter the gateway URL (e.g. `http://localhost:18610`) and the admin key, optionally a label, and click import.
-
-The extension reads the muse.ai cookies with their expiry and posts them to `POST /admin/accounts`. Its only fixed host permission is `muse.ai`; it asks for the gateway's origin when you save it, and never stores the cookies. See [its README](src/muse2api/web/extension/README.md) for details.
-
-Besides the admin key and `MUSE2API_API_KEY` (still accepted, logged as `legacy`), `/v1/*` accepts any non-revoked key created on the dashboard or with `POST /admin/keys {"name": "..."}`. Keys look like `m2a-...` and are shown once; `data/keys.json` stores only their SHA-256 hash and an 8-character prefix. Every `/v1/*` request (except `/v1/media/*` downloads) is recorded in `data/requests.db` (SQLite) with its key, model, account, status, latency and client IP (`CF-Connecting-IP` / `X-Forwarded-For` aware). Task status polls are flagged so the dashboard and stats can leave them out.
+`/v1/*` accepts `MUSE2API_API_KEY` (logged as `legacy`) and any non-revoked key created on the dashboard or with `POST /admin/keys {"name": "..."}`; the independent admin key is restricted to `/admin/*`. Keys look like `m2a-...` and are shown once; `data/keys.json` stores only their SHA-256 hash and an 8-character prefix. Every `/v1/*` request (except `/v1/media/*` downloads) is recorded in `data/requests.db` (SQLite) with its key, model, account, status, latency and client IP (`CF-Connecting-IP` / `X-Forwarded-For` aware). Task status polls are flagged so the dashboard and stats can leave them out.
 
 ## Configuration
 
@@ -318,7 +313,7 @@ All settings come from environment variables (prefix `MUSE2API_`) or a `.env` fi
 | `MUSE2API_DRIVER` | `mock` | Driver: `mock` / `browser` / `http` |
 | `MUSE2API_HOST` · `MUSE2API_PORT` | `127.0.0.1` · `18610` | Listen address and port |
 | `MUSE2API_API_KEY` | auto-generated | Key for `/v1/*` endpoints |
-| `MUSE2API_ADMIN_KEY` | same as API key | Key for `/admin/*` endpoints |
+| `MUSE2API_ADMIN_KEY` | empty (disabled) | Separate key for `/admin/*` endpoints |
 | `MUSE2API_REQUEST_LOG_RETENTION_DAYS` | `14` | Days of request history kept in `data/requests.db` |
 | `MUSE2API_MEDIA_RETENTION_DAYS` | `14` | Days generated media files are kept in `data/media`; `0` disables automatic cleanup |
 | `MUSE2API_STREAM_HEARTBEAT_INTERVAL` | `0` | SSE `: keepalive` comment interval (seconds) while waiting for the first stream token; `0` disables |
@@ -328,8 +323,8 @@ All settings come from environment variables (prefix `MUSE2API_`) or a `.env` fi
 | `MUSE2API_ACCOUNT_MAX_CONCURRENCY` | `1` | Parallel requests per account (browser driver: one tab each); 4 works well |
 | `MUSE2API_CHROMIUM_PATH` | auto-detected | Path to the browser executable |
 | `MUSE2API_KEEPALIVE_ENABLED` | `false` | Periodically renew sessions in the background |
-| `MUSE2API_WAKE_CONFIRM_S` | `20` | Seconds to wait for a woken VM to report `RUNNING` |
-| `MUSE2API_QUOTA_CACHE_S` | `1800` | How long a quota reading is reused before muse.ai is asked again |
+| `MUSE2API_RESPONSES_TOOLS_ENABLED` | `false` | Opt-in prompt-emulated structured tools; keep off until live Muse validation |
+| `MUSE2API_RESPONSES_STATE_TTL` | `900` | Seconds to retain process-local Responses IDs and pending calls |
 | `MUSE2API_MATTING_MODEL` | `birefnet-general` | Model for `background: "transparent"` (`birefnet-general-lite` is faster) |
 
 ## Roadmap
@@ -337,9 +332,9 @@ All settings come from environment variables (prefix `MUSE2API_`) or a `.env` fi
 All reserved modules and outstanding work are tracked in **[TODO.md](TODO.md)**, in four groups:
 
 - **Verification and live testing (do first)**: get the tests passing, test the browser driver against real accounts, and verify image/video generation and session renewal.
-- **Drivers**: direct HTTP protocol driver, conversation thread reuse, quota-aware scheduling.
+- **Drivers**: direct HTTP protocol driver, conversation thread reuse, quota lookup.
 - **Protocol**: `/v1/responses`, mask-based inpainting, emulated tool calling.
-- **Accounts, admin and operations**: storage backends, per-key rate limits, Prometheus metrics.
+- **Accounts, admin and operations**: cookie import browser extension, storage backends, per-key rate limits, Prometheus metrics.
 
 Each task lists its location, approach and definition of done. Places marked `TODO(contributors)` in the code are the reserved extension points.
 

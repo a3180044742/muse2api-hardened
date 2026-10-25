@@ -10,8 +10,9 @@
     "https://*.muse.ai/*"
   ],
   "optional_host_permissions": [
-    "http://*/*",
-    "https://*/*"
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "action": {
     "default_title": "__MSG_extName__",

@@ -40,7 +40,7 @@ async def renew_account(pool: AccountPool, driver: MuseDriver, account_id: str) 
     acc.meta["renewed_at"] = time.time()
     note_wake(acc, info.meta)
     await pool.upsert(acc)
-    return {"ok": info.ok, "meta": info.meta}
+    return {"ok": info.ok, "meta": acc.public()["meta"]}
 
 
 async def keepalive_loop(pool: AccountPool, driver: MuseDriver, interval: float) -> None:

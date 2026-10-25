@@ -4,6 +4,8 @@ import base64
 import json
 import time
 
+from muse2api.errors import UpstreamError
+
 
 def test_health(client):
     assert client.get("/healthz").json()["ok"] is True
@@ -49,6 +51,25 @@ def test_chat_wrong_model_kind(client, auth):
     r = client.post("/v1/chat/completions", headers=auth, json={
         "model": "muse-video", "messages": [{"role": "user", "content": "x"}]})
     assert r.status_code == 400
+
+
+def test_upstream_error_response_redacts_credentials(client, auth, monkeypatch):
+    async def fail(_account, _request):
+        raise UpstreamError(
+            "upstream rejected Authorization: Bearer response-bearer-fixture "
+            "api_key=response-key-fixture"
+        )
+        yield ""
+
+    monkeypatch.setattr(client.app.state.services.driver, "chat_stream", fail)
+    response = client.post("/v1/chat/completions", headers=auth, json={
+        "model": "gpt-4o", "messages": [{"role": "user", "content": "hello"}]})
+
+    assert response.status_code == 502
+    message = response.json()["error"]["message"]
+    assert "response-bearer-fixture" not in message
+    assert "response-key-fixture" not in message
+    assert "Bearer [REDACTED]" in message
 
 
 def test_image_url_and_media(client, auth):
@@ -239,9 +260,10 @@ def test_responses_stream(client, auth):
     types = [e["type"] for e in events]
     assert types[:4] == ["response.created", "response.in_progress",
                         "response.output_item.added", "response.content_part.added"]
-    assert all(t == "response.output_text.delta" for t in types[4:-2])
+    assert all(t == "response.output_text.delta" for t in types[4:-4])
     assert len(types) > 6
-    assert types[-2:] == ["response.output_item.done", "response.completed"]
+    assert types[-4:] == ["response.output_text.done", "response.content_part.done",
+                           "response.output_item.done", "response.completed"]
     first, last = events[0], events[-1]
     assert first["response"]["status"] == "in_progress"
     assert first["response"]["output"] == []
@@ -252,6 +274,10 @@ def test_responses_stream(client, auth):
     assert "stream me" in text
     seqs = [e["sequence_number"] for e in events]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    continued = client.post("/v1/responses", headers=auth, json={
+        "input": "continue immediately", "previous_response_id": final["id"],
+    })
+    assert continued.status_code == 200
 
 
 def test_responses_rejects_bad_input(client, auth):

@@ -8,6 +8,7 @@ is a one-file fix.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 import uuid
@@ -23,27 +24,31 @@ NEW_THREAD_URL = f"{SITE}/thread/new"
 SESSION_API = f"{SITE}/api/session"
 VM_WAKE_API = f"{SITE}/api/hatch/vm/wake"
 
-# Cookies that together make up a logged-in session.
-SESSION_COOKIES = ("hatch_sess", "hatch_gw", "hatch_vml", "hatch_native_auth_device")
+# Cookies that together make up a logged-in session.  The current web client
+# no longer emits ``hatch_gw`` for every account; the session endpoint remains
+# the authority, so that cookie is forwarded when present but is optional.
+SESSION_COOKIES = ("hatch_sess", "hatch_vml", "hatch_native_auth_device")
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/140.0.0.0 Safari/537.36"
 )
 
-
-# A wake request is only acknowledged with HTTP 200; the VM is up once the session
-# endpoint reports it RUNNING. Poll that for at most this many seconds.
+# A wake response is only an acknowledgement.  The session endpoint is the
+# source of truth for whether the workspace is actually ready.
 WAKE_CONFIRM_SECONDS = 20.0
 WAKE_POLL_SECONDS = 2.0
+MAX_WAKE_CONFIRM_SECONDS = 120.0
 
 
-def wake_confirm_seconds() -> float:
-    """``MUSE2API_WAKE_CONFIRM_S`` (read here: config.py has no knob for it)."""
+def _bounded_seconds(value: object, default: float) -> float:
     try:
-        return max(0.0, float(os.environ.get("MUSE2API_WAKE_CONFIRM_S", WAKE_CONFIRM_SECONDS)))
-    except ValueError:
-        return WAKE_CONFIRM_SECONDS
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(seconds):
+        return default
+    return min(max(seconds, 0.0), MAX_WAKE_CONFIRM_SECONDS)
 
 
 def cookie_header(cookies: dict[str, str]) -> str:
@@ -54,12 +59,19 @@ def missing_session_cookies(cookies: dict[str, str]) -> list[str]:
     return [name for name in SESSION_COOKIES if not cookies.get(name)]
 
 
+def wake_confirm_seconds() -> float:
+    """Read the bounded wake confirmation window from the environment."""
+    return _bounded_seconds(os.environ.get("MUSE2API_WAKE_CONFIRM_S", WAKE_CONFIRM_SECONDS),
+                            WAKE_CONFIRM_SECONDS)
+
+
 def _merge_cookies(resp: httpx.Response, jar: dict[str, str], expires: dict[str, int]) -> None:
-    for c in resp.cookies.jar:
-        if c.value:
-            jar[c.name] = c.value
-        if c.expires:
-            expires[c.name] = int(c.expires)
+    """Merge Set-Cookie values without retaining any response text."""
+    for cookie in resp.cookies.jar:
+        if cookie.value:
+            jar[cookie.name] = cookie.value
+        if cookie.expires:
+            expires[cookie.name] = int(cookie.expires)
 
 
 def _json_body(resp: httpx.Response) -> dict:
@@ -73,25 +85,18 @@ def _json_body(resp: httpx.Response) -> dict:
 
 
 async def renew_session(
-    cookies: dict[str, str],
-    *,
-    wake_vm: bool = True,
-    timeout: float = 15.0,
-    confirm_s: float | None = None,
-    poll_s: float = WAKE_POLL_SECONDS,
+    cookies: dict[str, str], *, wake_vm: bool = True, timeout: float = 15.0,
+    confirm_s: float | None = None, poll_s: float = WAKE_POLL_SECONDS,
     sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> SessionInfo:
     """Hit the session endpoint, which rotates short-lived cookies via Set-Cookie,
     and optionally wake the account's cloud workspace so the first request is fast.
 
-    After the wake request, whatever it answered, the session endpoint is polled
-    until it reports the VM ``RUNNING`` or ``confirm_s`` (default
-    ``MUSE2API_WAKE_CONFIRM_S``, 20s) runs out. ``meta["vm_state_after"]`` is the
-    last state seen while polling (None when no poll succeeded) and
-    ``meta["vm_wake_ok"]`` is True for RUNNING, False for any other state seen, and
-    None when no state was seen. ``meta["vm_wake_http"]`` records the wake's own
-    status code (or exception name) for diagnosis."""
+    The wake response is not treated as proof of readiness.  When a VM id is
+    present, the session endpoint is polled until it reports ``RUNNING`` or the
+    bounded confirmation window expires.  Poll responses can rotate cookies too.
+    """
     headers = {
         "User-Agent": USER_AGENT,
         "Origin": SITE,
@@ -109,10 +114,14 @@ async def renew_session(
 
         _merge_cookies(resp, jar, expires)
         body = _json_body(resp)
-        # Persisted with the account, so keep only short strings.
-        meta = {key: (str(body[src])[:128] if body.get(src) is not None else None)
-                for key, src in (("session_status", "status"), ("vm_id", "vm_id"),
-                                 ("vm_state", "vm_state"))}
+        meta = {
+            key: (str(body[source])[:128] if body.get(source) is not None else None)
+            for key, source in (
+                ("session_status", "status"),
+                ("vm_id", "vm_id"),
+                ("vm_state", "vm_state"),
+            )
+        }
 
         if wake_vm and meta["vm_id"] and meta["vm_state"] != "DISABLED":
             try:
@@ -125,42 +134,54 @@ async def renew_session(
                 meta["vm_wake_http"] = str(w.status_code)
             except httpx.HTTPError as exc:
                 meta["vm_wake_http"] = type(exc).__name__
-            # The wake's own answer says little: muse.ai answers 403 to a wake for a
-            # VM that is already RUNNING. Judge by the state the session reports.
             meta["vm_state_after"] = await _confirm_running(
                 client, jar, expires, timeout=timeout,
                 confirm_s=wake_confirm_seconds() if confirm_s is None else confirm_s,
-                poll_s=poll_s, sleep=sleep, clock=clock)
-            # None when no poll answered: unknown is not evidence the VM is down.
-            meta["vm_wake_ok"] = (None if meta["vm_state_after"] is None
-                                  else meta["vm_state_after"] == "RUNNING")
+                poll_s=poll_s, sleep=sleep, clock=clock, request_headers=headers,
+            )
+            meta["vm_wake_ok"] = (
+                None if meta["vm_state_after"] is None
+                else meta["vm_state_after"] == "RUNNING"
+            )
 
     return SessionInfo(ok=meta["session_status"] == "assigned", cookies=jar,
                        cookie_expires=expires, meta=meta)
 
 
 async def _confirm_running(
-    client: httpx.AsyncClient, jar: dict[str, str], expires: dict[str, int], *,
-    timeout: float, confirm_s: float, poll_s: float,
-    sleep: Callable[[float], Awaitable[object]], clock: Callable[[], float],
+    client: httpx.AsyncClient,
+    jar: dict[str, str],
+    expires: dict[str, int],
+    *,
+    timeout: float,
+    confirm_s: float,
+    poll_s: float,
+    sleep: Callable[[float], Awaitable[object]],
+    clock: Callable[[], float],
+    request_headers: dict[str, str],
 ) -> str | None:
-    """Poll the session endpoint until the VM is ``RUNNING`` or ``confirm_s`` passes.
-    Returns the last ``vm_state`` seen. Errors only cost that poll."""
-    deadline = clock() + confirm_s
+    """Poll session state while tolerating transient upstream failures."""
+    window = _bounded_seconds(confirm_s, WAKE_CONFIRM_SECONDS)
+    interval = max(0.01, _bounded_seconds(poll_s, WAKE_POLL_SECONDS))
+    deadline = clock() + window
     state: str | None = None
     while True:
         remaining = deadline - clock()
         try:
-            resp = await client.get(SESSION_API, headers={"Cookie": cookie_header(jar)},
-                                    timeout=max(1.0, min(timeout, remaining)))
+            response = await client.get(
+                SESSION_API,
+                headers={**request_headers, "Cookie": cookie_header(jar)},
+                timeout=max(1.0, min(timeout, max(remaining, 0.001))),
+            )
         except httpx.HTTPError:
-            resp = None
-        if resp is not None and resp.status_code < 400:
-            _merge_cookies(resp, jar, expires)
-            if (seen := _json_body(resp).get("vm_state")) is not None:
+            response = None
+        if response is not None and response.status_code < 400:
+            _merge_cookies(response, jar, expires)
+            seen = _json_body(response).get("vm_state")
+            if seen is not None:
                 state = str(seen)[:128]
                 if state == "RUNNING":
                     return state
-        if clock() + poll_s > deadline:
+        if clock() + interval > deadline:
             return state
-        await sleep(poll_s)
+        await sleep(interval)

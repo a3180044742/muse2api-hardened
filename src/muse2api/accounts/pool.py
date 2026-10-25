@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import math
 import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Iterable
@@ -24,37 +25,55 @@ from .store import AccountStore
 
 log = logging.getLogger(__name__)
 
+
 WAKE_BLOCK_KIND = "video"
 WAKE_BLOCK_SECONDS = 600
-"""How long an account whose VM wake was not confirmed is skipped for video: a video
-on a VM that is not RUNNING stalls for minutes."""
+"""How long an account with an unconfirmed VM wake is skipped for video."""
 
 
 def _kind_blocked_until(acc: Account, kind: str) -> float:
-    return float((acc.meta.get("kind_blocked_until") or {}).get(kind, 0.0))
+    blocks = acc.meta.get("kind_blocked_until")
+    if not isinstance(blocks, dict):
+        return 0.0
+    try:
+        value = float(blocks.get(kind, 0.0))
+        return value if math.isfinite(value) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def note_wake(acc: Account, session_meta: dict) -> None:
-    """Apply the VM wake outcome of one session renewal (``session_meta`` is that
-    renewal's ``SessionInfo.meta``) through the per-kind block in
-    ``meta["kind_blocked_until"]``: an unconfirmed wake blocks video for
-    ``WAKE_BLOCK_SECONDS``; a confirmed one lifts that block again, but never a
-    longer block set for another reason."""
+    """Record a VM wake result without making the whole account unavailable.
+
+    A failed/unknown wake only defers video, which is the operation most likely to
+    stall on a sleeping workspace.  A confirmed wake removes only the block this
+    helper created; longer blocks from another subsystem remain intact.
+    """
     ok = session_meta.get("vm_wake_ok")
-    if ok is None:  # no wake attempted this time
+    if not isinstance(ok, bool):
         return
     now = time.time()
-    blocks = {k: t for k, t in (acc.meta.get("kind_blocked_until") or {}).items() if t > now}
+    blocks: dict[str, float] = {}
+    existing = acc.meta.get("kind_blocked_until")
+    if not isinstance(existing, dict):
+        existing = {}
+    for kind, until in existing.items():
+        try:
+            expires_at = float(until)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(expires_at) and expires_at > now:
+            blocks[str(kind)] = expires_at
     ours = acc.meta.pop("wake_blocked_until", None)
     if not ok:
         until = now + WAKE_BLOCK_SECONDS
         if blocks.get(WAKE_BLOCK_KIND, 0.0) < until:
             blocks[WAKE_BLOCK_KIND] = until
             acc.meta["wake_blocked_until"] = until
-            log.warning("account %s vm wake not confirmed (state %s); no video on it for %ds",
-                        acc.id, session_meta.get("vm_state_after"), WAKE_BLOCK_SECONDS)
+            log.warning("account %s vm wake not confirmed; deferring video for %ds",
+                        acc.id, WAKE_BLOCK_SECONDS)
     elif ours is not None and blocks.get(WAKE_BLOCK_KIND) == ours:
-        del blocks[WAKE_BLOCK_KIND]
+        blocks.pop(WAKE_BLOCK_KIND, None)
     acc.meta["kind_blocked_until"] = blocks
 
 
@@ -175,9 +194,7 @@ class AccountPool:
 
     # ---- scheduling ----
     def _kind_blocked(self, kind: str | None, now: float) -> set[str]:
-        """Ids of accounts still blocked for ``kind`` (see ``note_wake``). Empty when
-        every usable account is blocked: a block must never make the kind unusable
-        altogether, so then everyone gets tried again."""
+        """Return accounts deferred for ``kind``; never make a kind unusable."""
         if kind is None:
             return set()
         usable = [a for a in self._accounts.values()
@@ -206,14 +223,14 @@ class AccountPool:
         return free, busy, back_at
 
     def has_alternative(self, exclude: Iterable[str], kind: str | None = None) -> bool:
-        """Whether an enabled, valid account exists outside ``exclude`` (busy or cooling counts)
-        that is not blocked for ``kind``."""
+        """Whether an enabled, valid account exists outside ``exclude``."""
         excluded = set(exclude) | self._kind_blocked(kind, time.time())
         return any(a.id not in excluded and a.enabled and a.status != AccountStatus.INVALID
                    for a in self._accounts.values())
 
     async def acquire(
-        self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None
+        self, *, exclude: Iterable[str] = (), hint: str | None = None,
+        kind: str | None = None,
     ) -> Account:
         exclude = tuple(exclude)
         deadline = time.monotonic() + self.acquire_timeout
@@ -258,7 +275,7 @@ class AccountPool:
         acc.last_error = str(error)[:500]
         if isinstance(error, UpstreamAuthError):
             acc.status = AccountStatus.INVALID
-            log.warning("account %s marked invalid: %s", acc.id, error)
+            log.warning("account %s marked invalid (%s)", acc.id, type(error).__name__)
         elif isinstance(error, UpstreamQuotaError):
             acc.status = AccountStatus.COOLING
             acc.cooldown_until = time.time() + max(self.cooldown, 3600)
@@ -273,7 +290,8 @@ class AccountPool:
 
     @asynccontextmanager
     async def lease(
-        self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None
+        self, *, exclude: Iterable[str] = (), hint: str | None = None,
+        kind: str | None = None,
     ) -> AsyncIterator[Lease]:
         acc = await self.acquire(exclude=exclude, hint=hint, kind=kind)
         lease = Lease(acc)

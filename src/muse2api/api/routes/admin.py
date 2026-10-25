@@ -28,7 +28,7 @@ from ..schemas import AccountCreate, AccountsImportRequest, AccountUpdate, KeyCr
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin_key)])
 
 EXTENSION_DIR = Path(__file__).resolve().parents[2] / "web" / "extension"
-"""Unpacked Chrome extension that imports muse.ai cookies into this gateway."""
+"""Unpacked extension; it is returned only after admin-key authentication."""
 
 
 def parse_cookies(value: dict[str, str] | str | list[dict]) -> tuple[dict[str, str], dict[str, int]]:
@@ -154,7 +154,7 @@ async def delete_account(account_id: str, svc: Services = Depends(get_services))
 async def reset_account(account_id: str, svc: Services = Depends(get_services)) -> dict:
     acc = _get(svc, account_id)
     acc.status, acc.cooldown_until, acc.last_error = AccountStatus.ACTIVE, 0.0, None
-    acc.meta.pop("kind_blocked_until", None)  # e.g. video after an unconfirmed VM wake
+    acc.meta.pop("kind_blocked_until", None)
     acc.meta.pop("wake_blocked_until", None)
     await svc.pool.upsert(acc)
     return {"account": acc.public()}
@@ -171,10 +171,8 @@ async def account_quota(account_id: str, refresh: bool = False,
                         svc: Services = Depends(get_services)) -> dict:
     """Ask the active driver for the account's quota snapshot and persist it in ``meta``.
 
-    The browser driver caches each account's snapshot for 30 minutes
-    (``MUSE2API_QUOTA_CACHE_S``); ``?refresh=1`` reads the page again. It answers
-    409 while every tab of the account is serving a request. Drivers that do not
-    implement ``MuseDriver.quota`` raise ``FeatureNotImplemented`` (HTTP 501).
+    The browser driver caches each snapshot; ``refresh=1`` explicitly invalidates
+    that cache. Drivers without quota support return HTTP 501.
     """
     acc = _get(svc, account_id)
     if refresh and (forget := getattr(svc.driver, "forget_quota", None)):
@@ -187,19 +185,19 @@ async def account_quota(account_id: str, refresh: bool = False,
 
 @router.get("/extension.zip")
 async def extension_zip() -> Response:
-    """The cookie-import browser extension, zipped in memory for "Load unpacked"."""
+    """Return a filtered extension archive for an authenticated administrator."""
     root = EXTENSION_DIR
-    # No symlinks (they could point outside the directory) and no dotfiles.
-    files = sorted(f for f in root.rglob("*")
-                   if f.is_file() and not f.is_symlink()
-                   and not any(part.startswith(".") for part in f.relative_to(root).parts)
-                   ) if root.is_dir() else []
+    files = sorted(
+        f for f in root.rglob("*")
+        if f.is_file() and not f.is_symlink()
+        and not any(part.startswith(".") for part in f.relative_to(root).parts)
+    ) if root.is_dir() else []
     if not files:
         raise NotFound("the browser extension is not bundled with this server")
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in files:
-            zf.write(f, f"muse2api-extension/{f.relative_to(root).as_posix()}")
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        for file in files:
+            archive.write(file, f"muse2api-extension/{file.relative_to(root).as_posix()}")
     return Response(buf.getvalue(), media_type="application/zip", headers={
         "Content-Disposition": 'attachment; filename="muse2api-extension.zip"'})
 

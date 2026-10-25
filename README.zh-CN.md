@@ -46,7 +46,7 @@ muse2api 把 muse.ai 的聊天、文生图和文生视频能力变成标准的 O
 
 ## 状态
 
-> **当前**：本地 mock-driver 测试套件通过（81 个测试，无需网络），每次推送到 main 都会跑 CI；浏览器 driver 和直连协议 driver 仍需用真实 muse.ai 账号做实测。
+> **当前**：候选版本测试套件通过（119 passed、2 skipped，无需网络），每次推送到 main 都会跑 CI；浏览器/会话续期和直连协议仍需在私有云候选环境用真实 Muse 账号实测。
 
 | 模块 | 状态 | 备注 |
 |---|---|---|
@@ -59,14 +59,13 @@ muse2api 把 muse.ai 的聊天、文生图和文生视频能力变成标准的 O
 | 会话续期 / 保活 | 🧪 待实测 | 纯 HTTP，默认关闭 |
 | 直连 HTTP 协议 driver | 🚧 预留 | 返回 501 |
 | `/v1/images/edits`（参考图） | ✅ 已实现 | 参考图用于生成新图；不支持 `mask` |
-| `/v1/responses` | 🚧 预留 | 返回 501 |
+| `/v1/responses` | ✅ 文本/SSE；结构化工具需显式开启 | 文本 Responses 已支持。工具仿真默认关闭，开启前必须完成真实 Muse 验证。 |
 | 流式心跳（SSE keepalive） | ✅ 已实现 | 用 `MUSE2API_STREAM_HEARTBEAT_INTERVAL` 开启；等第一个 token 期间发送 `: keepalive` 注释 |
 | 媒体自动清理 | ✅ 已实现 | `MUSE2API_MEDIA_RETENTION_DAYS`（默认 14 天，`0` 关闭）；每小时后台清理 |
 | 服务端图片抓取的 SSRF 防护 | ✅ 已实现 | 拒绝内网和回环地址 |
 | 网页控制台、请求日志、多 API key | ✅ 已实现 | 控制台在 `/dashboard`；key 增删改查在 `/admin/keys`；逐请求日志和统计聚合 |
-| 额度查询 | ✅ 已实现 | 浏览器 driver 在空闲 tab 上读取 Settings → Usage（套餐、本周用量百分比、重置时间、额外额度；支持英文 / 简体 / 繁体界面），缓存 30 分钟；mock driver 返回假快照；http driver 尚未接入 |
-| VM 唤醒确认 | ✅ 已实现 | 唤醒（keepalive 或 `/admin/accounts/{id}/renew`）后轮询会话，直到 VM 报告 `RUNNING`；确认 VM 没起来的账号 10 分钟内不接视频请求 |
-| Cookie 导入浏览器插件 | ✅ 已实现 | MV3 弹窗插件，位于 `src/muse2api/web/extension/`，可在控制台下载 |
+| 额度查询 | 🧪 待接真 driver | Mock driver 返回假快照；browser/http driver 尚未接入 |
+| Cookie 导入浏览器插件 | 🚧 预留 | |
 | 存储后端（SQLite / Redis） | 🚧 预留 | 账号仍用 JSON 存储；请求日志已是 SQLite |
 | Prometheus 指标 | 🚧 预留 | `/admin/stats` 已有基础聚合 |
 
@@ -170,15 +169,23 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+### 镜像发布与更新
+
+GitHub Actions 会先运行 Ruff 和 Python 3.10/3.12 测试矩阵，再发布 GHCR 镜像。在这个 hardened fork 中，推送到 `main` 会发布 `ghcr.io/a3180044742/muse2api-hardened:main` 和不可变的 `sha-<commit>` 标签；`v*` 标签会发布对应版本和 commit 标签。部署时固定使用提交 digest，不使用会移动的 `main`。在仓库外配置 GHCR 包可见性或拉取权限；镜像中不要放账号 Cookie 或 API key。流水线只负责构建发布，不负责直接部署；云端更新器应先拉取候选镜像、执行健康和协议检查，通过后再晋级。
+
+定时的 `Check upstream Muse updates` 工作流会比较本分支与上游 `main`，发现上游前进时创建或更新审查 issue。它不会自动合并或部署上游代码；仍需先审查并通过常规测试和不可变镜像门禁。
+
+Dependabot 还会每周检查 Python 和 GitHub Actions 依赖。每个依赖 PR 仍需通过相同的测试、固定 digest 发布和云端健康门禁流程。
+
 ### 用真实账号（浏览器 driver）
 
 1. 装好 Chromium 或 Chrome，在 `.env` 里设置 `MUSE2API_DRIVER=browser`。
-2. 从已登录 muse.ai 的浏览器导出 cookies。至少需要 `hatch_sess`、`hatch_gw`、`hatch_vml` 和 `hatch_native_auth_device`。
+2. 从已登录 muse.ai 的浏览器导出 cookies。需要 `hatch_sess`、`hatch_vml` 和 `hatch_native_auth_device`；存在时会一并传递 `hatch_gw`，但它可以缺省。
 3. 通过下面的 Admin API 示例把账号导进来。
 
 ## 接口示例
 
-所有 `/v1/*` 接口都需要请求头 `Authorization: Bearer <API_KEY>`。`/admin/*` 接口用 `MUSE2API_ADMIN_KEY`，没设置时默认和 API key 相同。
+所有 `/v1/*` 接口都需要请求头 `Authorization: Bearer <API_KEY>`。`/admin/*` 接口使用独立配置的 `MUSE2API_ADMIN_KEY`；留空时关闭管理 API。
 
 **聊天（流式）**
 
@@ -278,36 +285,22 @@ curl http://localhost:18610/admin/accounts \
 | GET/POST/PATCH/DELETE | `/admin/accounts[/{id}]` | 账号增删改查 |
 | POST | `/admin/accounts/import` | 账号批量导入，逐条报错 |
 | POST | `/admin/accounts/{id}/renew` · `/reset` | 会话续期 · 重置账号状态 |
-| GET | `/admin/accounts/{id}/quota[?refresh=1]` | 额度快照（缓存 30 分钟；`refresh=1` 重新读取；账号所有 tab 都在忙时返回 409 `account_busy`） |
-| GET | `/admin/extension.zip` | 下载 cookie 导入 Chrome 插件 |
 | GET | `/admin/status` · `/admin/tasks` | 服务状态 · 任务列表 |
 | GET/POST/PATCH/DELETE | `/admin/keys[/{id}]` | 客户端 API key（创建时只返回一次明文；PATCH 改名/吊销） |
 | GET | `/admin/requests` · `/admin/stats?window=1h\|24h\|7d` | 请求日志（可按 `key_id`、`account_id`、`status=2xx\|4xx\|5xx`、`path`、`since` 过滤，`hide_polls` 隐藏轮询）· 聚合统计 |
+| GET | `/admin/extension.zip` | 下载 cookie 导入扩展（需要 admin key） |
 | GET | `/dashboard` | 网页控制台（在浏览器里输入 admin key） |
-| POST | `/v1/responses` | 预留，目前返回 501 |
+| POST | `/v1/responses` | 文本/SSE Responses；`previous_response_id` 和结构化工具续接仅在 `MUSE2API_RESPONSES_TOOLS_ENABLED=true` 时可用 |
 
 ### 控制台、API key 与请求日志
 
-打开 `http://localhost:18610/dashboard` 并输入 admin key；key 存在浏览器的 local storage 里，以 Bearer token 发给 `/admin/*`。页面展示请求量、错误率、延迟、账号池（启用/禁用、续期、重置）、实时请求日志和 API key 管理。
+打开 `http://localhost:18610/dashboard` 并输入 admin key；key 仅保存在当前标签页的 session storage 中，以 Bearer token 发给 `/admin/*`。页面展示请求量、错误率、延迟、账号池（启用/禁用、续期、重置）、实时请求日志和 API key 管理。
 
-![控制台概览](docs/images/dashboard-overview.png)
+#### Cookie 导入扩展
 
-每张账号卡片显示额度（用量条、套餐、重置日期、读取时间，点 **Quota** 按钮可重新读取）、会话 cookie 的过期时间，以及上次唤醒后 VM 是否确认在运行。**Import hàng loạt**（批量导入）每行一个 `标签 | cookie 字符串`。
+已通过管理员认证的控制台可从 `/admin/extension.zip` 下载 Chrome/Edge 扩展。解压并以“加载已解压的扩展程序”安装后，在同一个浏览器登录 Muse，填写网关地址和 admin key 即可导入会话。`hatch_gw` 可选，其余当前会话 cookie 必须齐全。扩展不会保存 cookie。远程网关必须使用 HTTPS；HTTP 仅允许 localhost，且读取 cookie 前会拒绝含 URL 用户名、密码、查询参数或片段的地址。
 
-![账号页](docs/images/dashboard-accounts.png)
-
-#### Cookie 导入插件
-
-muse.ai 的会话 cookie 都是 httpOnly，页面脚本读不到；一个小小的 Chrome / Edge 插件（Manifest V3，位于 `src/muse2api/web/extension/`）可以。
-
-1. 在控制台的账号页点 **Tải extension**（下载插件），得到 `muse2api-extension.zip`（也可以直接访问 `GET /admin/extension.zip`），解压。
-2. 打开 `chrome://extensions`，开启**开发者模式**，点**加载已解压的扩展程序**，选择解压后的文件夹。
-3. 在这个浏览器里登录 [muse.ai](https://muse.ai/)。
-4. 打开插件弹窗，填入网关地址（如 `http://localhost:18610`）和 admin key，可选填一个标签，然后点导入。
-
-插件会连同过期时间一起读取 muse.ai 的 cookie，POST 到 `/admin/accounts`。它固定的主机权限只有 `muse.ai`；网关地址的访问权限在保存设置时才申请，cookie 本身从不保存在插件里。详见[插件说明](src/muse2api/web/extension/README.md)。
-
-除了 admin key 和 `MUSE2API_API_KEY`（仍可用，日志里记为 `legacy`），`/v1/*` 接受任何未被吊销的 key：在控制台或用 `POST /admin/keys {"name": "..."}` 创建。key 长这样 `m2a-...`，只在创建时展示一次；`data/keys.json` 只存它们的 SHA-256 哈希和 8 字符前缀。每个 `/v1/*` 请求（`/v1/media/*` 下载除外）都会记到 `data/requests.db`（SQLite），含 key、模型、账号、状态码、延迟和客户端 IP（识别 `CF-Connecting-IP` / `X-Forwarded-For`）。任务状态轮询会被打标，控制台和统计可以排除它们。
+`/v1/*` 接受 `MUSE2API_API_KEY`（日志里记为 `legacy`）和控制台或 `POST /admin/keys {"name": "..."}` 创建的未吊销 key；独立的 admin key 仅限 `/admin/*`。key 长这样 `m2a-...`，只在创建时展示一次；`data/keys.json` 只存它们的 SHA-256 哈希和 8 字符前缀。每个 `/v1/*` 请求（`/v1/media/*` 下载除外）都会记到 `data/requests.db`（SQLite），含 key、模型、账号、状态码、延迟和客户端 IP（识别 `CF-Connecting-IP` / `X-Forwarded-For`）。任务状态轮询会被打标，控制台和统计可以排除它们。
 
 ## 配置
 
@@ -318,7 +311,7 @@ muse.ai 的会话 cookie 都是 httpOnly，页面脚本读不到；一个小小�
 | `MUSE2API_DRIVER` | `mock` | driver：`mock` / `browser` / `http` |
 | `MUSE2API_HOST` · `MUSE2API_PORT` | `127.0.0.1` · `18610` | 监听地址和端口 |
 | `MUSE2API_API_KEY` | 自动生成 | `/v1/*` 接口的 key |
-| `MUSE2API_ADMIN_KEY` | 同 API key | `/admin/*` 接口的 key |
+| `MUSE2API_ADMIN_KEY` | 空（关闭） | `/admin/*` 接口的独立 key |
 | `MUSE2API_REQUEST_LOG_RETENTION_DAYS` | `14` | `data/requests.db` 里保留多少天的请求历史 |
 | `MUSE2API_MEDIA_RETENTION_DAYS` | `14` | `data/media` 里生成的媒体文件保留多少天；`0` 关闭自动清理 |
 | `MUSE2API_STREAM_HEARTBEAT_INTERVAL` | `0` | 等第一个流式 token 期间 SSE `: keepalive` 注释的发送间隔（秒）；`0` 关闭 |
@@ -328,8 +321,8 @@ muse.ai 的会话 cookie 都是 httpOnly，页面脚本读不到；一个小小�
 | `MUSE2API_ACCOUNT_MAX_CONCURRENCY` | `1` | 每个账号的并行请求数（browser driver：每请求一个 tab）；4 比较好用 |
 | `MUSE2API_CHROMIUM_PATH` | 自动探测 | 浏览器可执行文件路径 |
 | `MUSE2API_KEEPALIVE_ENABLED` | `false` | 后台定期续期会话 |
-| `MUSE2API_WAKE_CONFIRM_S` | `20` | 唤醒 VM 后最多等多少秒让它报告 `RUNNING` |
-| `MUSE2API_QUOTA_CACHE_S` | `1800` | 额度读数复用多久（秒），过期后才重新问 muse.ai |
+| `MUSE2API_RESPONSES_TOOLS_ENABLED` | `false` | 显式开启基于提示词仿真的结构化工具；真实 Muse 验证前保持关闭 |
+| `MUSE2API_RESPONSES_STATE_TTL` | `900` | 进程内保留 Responses ID 和待处理调用的秒数 |
 | `MUSE2API_MATTING_MODEL` | `birefnet-general` | `background: "transparent"` 用的抠图模型（`birefnet-general-lite` 更快） |
 
 ## 路线图
@@ -337,9 +330,9 @@ muse.ai 的会话 cookie 都是 httpOnly，页面脚本读不到；一个小小�
 所有预留模块和未完成的工作都在 **[TODO.md](TODO.md)** 里跟踪，分四组：
 
 - **验证与实测（先做）**：把测试跑通、用真实账号测浏览器 driver、验证图片/视频生成和会话续期。
-- **Driver**：直连 HTTP 协议 driver、会话复用降首字延迟、按额度调度账号。
+- **Driver**：直连 HTTP 协议 driver、会话复用降首字延迟、额度查询。
 - **协议层**：`/v1/responses`、mask 局部重绘、仿真 tool calling。
-- **账号、管理与运维**：存储后端、按 key 限流、Prometheus 指标。
+- **账号、管理与运维**：cookie 导入浏览器插件、存储后端、按 key 限流、Prometheus 指标。
 
 每个任务都写了位置、做法和完成标准。代码里标了 `TODO(contributors)` 的地方是预留的扩展点。
 

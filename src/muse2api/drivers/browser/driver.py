@@ -93,7 +93,7 @@ class _Tab:
     image_count: int = 0
     thread_url: str = ""
     quota_note: str = ""
-    """Last ignored quota-hint snippet, so a page polled every 0.6s logs it once."""
+    """Last quota marker observed, without retaining page text or URLs."""
     busy: bool = False
     stale: bool = False
     """Cookies were renewed; close this tab once it is idle."""
@@ -301,7 +301,7 @@ class BrowserDriver(MuseDriver):
             return
         turns = []
         for item in hot.get("turns") or []:
-            if isinstance(item, (list, tuple)) and len(item) == 2:
+            if isinstance(item, list | tuple) and len(item) == 2:
                 turns.append((str(item[0]), str(item[1])))
         tab.turns = turns
         tab.hint = hot.get("hint") or None
@@ -405,20 +405,16 @@ class BrowserDriver(MuseDriver):
         tail = state.get("tail", "")
         low = tail.lower()
         if hit := next((h for h in dom.QUOTA_HINTS if h in low), None):
-            i = low.find(hit)
-            snippet = " ".join(tail[max(0, i - 120):i + 120].split())
             # The page tail also holds the prompt and the thread-history sidebar, and
             # matching it cooled down accounts whose images muse.ai went on to deliver.
             # Only a finished agent reply that says so counts; anything else is logged.
             reply = state.get("lastText", "")
             if not state.get("generating") and hit in reply.lower():
-                log.warning("quota hint %r in reply on %s: %s", hit,
-                            tab.thread_url or "new thread", snippet)
-                raise UpstreamQuotaError(f"muse.ai reports the account is out of quota: …{snippet}…")
-            if snippet != tab.quota_note:
-                tab.quota_note = snippet
-                log.info("ignoring quota hint %r outside the reply on %s: %s", hit,
-                         tab.thread_url or "new thread", snippet)
+                log.warning("quota marker observed in completed reply for account %s", tab.account_id)
+                raise UpstreamQuotaError("upstream account quota exhausted")
+            if hit != tab.quota_note:
+                tab.quota_note = hit
+                log.info("ignoring quota marker outside completed reply for account %s", tab.account_id)
         return state
 
     async def _prepare(self, tab: _Tab, prompt: str, images: list[InputImage]) -> dict:
@@ -482,9 +478,9 @@ class BrowserDriver(MuseDriver):
                 tab.thread_url or await self._live_continuation(tab)
             ):
                 if await self._on_thread(tab) or await self._live_continuation(tab):
-                    log.info("reusing hot page %s", tab.thread_url or "open page")
+                    log.info("reusing hot page for account %s", tab.account_id)
                 elif tab.thread_url:
-                    log.info("reopening %s", tab.thread_url)
+                    log.info("reopening thread for account %s", tab.account_id)
                     await self._open_saved(tab)
                 prompt = follow
                 images = req.images[tab.image_count:]
@@ -558,7 +554,7 @@ class BrowserDriver(MuseDriver):
                     await asyncio.sleep(0.2)
                 self._save_hot(tab, account, req, url if is_thread_url(url) else "")
                 if tab.thread_url:
-                    log.info("saved hot page %s", tab.thread_url)
+                    log.info("saved hot page for account %s", tab.account_id)
                 else:
                     log.info("reply finished but the thread url was not ready yet")
             else:
@@ -633,8 +629,8 @@ class BrowserDriver(MuseDriver):
                         # an image gallery (raw, QC crops and final mixed together), or
                         # when it recognises a repeat request and points at the earlier
                         # file. Asking once gets the final file attached in chat.
-                        log.info("%s not attached (%s); asking for it in chat: %.120s", kind,
-                                 "denied approval" if denied else "text-only reply", text)
+                        log.info("%s not attached (%s); asking for it in chat", kind,
+                                 "denied approval" if denied else "text-only reply")
                         await self._send(tab, f"Please attach the final {kind} file here in "
                                               "the chat" + (" instead of uploading it." if denied
                                                             else ", as a single attachment."))
@@ -645,11 +641,10 @@ class BrowserDriver(MuseDriver):
                     probe = await tab.session.evaluate(dom.LAST_BUBBLE_MEDIA) or {}
                     url = self._pick_media_url(probe.get("links", []), kind)
                     if url:
-                        log.info("%s delivered as link in text bubble: %s", kind, url)
+                        log.info("%s delivered as link in text bubble", kind)
                         return {"src": url, "kind": kind}
-                    log.info("%s: no media after %.0fs grace; links=%s html=%.300s",
-                             kind, grace, probe.get("links", []), probe.get("html", ""))
-                    raise UpstreamRefused(f"upstream replied with text only: {text[:200]}")
+                    log.info("%s: no media after %.0fs grace", kind, grace)
+                    raise UpstreamRefused("upstream replied without the requested media")
             else:
                 text_done_at = None
         if busy:

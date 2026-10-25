@@ -4,8 +4,8 @@
  * Reads muse.ai cookies (including httpOnly) via chrome.cookies and POSTs them to
  * POST {base}/admin/accounts  with Authorization: Bearer <admin key>.
  *
- * Cookies are NEVER stored in extension storage; only the gateway URL and key are saved.
- * Host permissions: muse.ai + optional gateway URL (requested at save time).
+ * Cookies and the admin key are never stored in extension storage.
+ * Host permissions: muse.ai + the exact gateway origin (requested before reading cookies).
  *
  * https://github.com/www222fff/muse2api
  */
@@ -17,7 +17,7 @@ const STORE_KEY = "muse2api_ext_cfg";
 const LANG_KEY = "muse2api_ext_lang";
 
 // Core httpOnly cookies required for generation.
-const ESSENTIAL = ["hatch_sess", "hatch_gw", "hatch_vml", "hatch_native_auth_device"];
+const ESSENTIAL = ["hatch_sess", "hatch_vml", "hatch_native_auth_device"];
 
 // ---- i18n ----
 const LANG_STRINGS = {
@@ -30,9 +30,11 @@ const LANG_STRINGS = {
     steps: `<b>Before you start:</b><br>
       1. Logged in to <a href="https://muse.ai/" target="_blank" style="color:#2fbfab">muse.ai</a> in <b>this browser</b>.<br>
       2. Gateway URL and Admin Key filled in (from the muse2api dashboard "Accounts" tab).`,
-    foot: `Reads muse.ai cookies via <code>chrome.cookies</code> and POSTs to your gateway. Nothing sent to third parties. Cookies never stored.`,
+    foot: `Reads muse.ai cookies via <code>chrome.cookies</code> and POSTs to your gateway. Nothing sent to third parties. Cookies and admin key are never stored.`,
     noBase: "Please enter the Gateway URL first.",
     noKey: "Please enter the Admin Key first.",
+    httpsOnly: "Use HTTPS for gateway URLs. Plain HTTP is only allowed for localhost.",
+    permission: "Gateway permission was not granted.",
     reading: "Reading muse.ai cookies\u2026",
     noCookies: "No muse.ai cookies found.\nOpen and log in to https://muse.ai/ in this browser first, then click again.",
     missingCore: "Read {n} cookies but missing core: {missing}\nLog in to muse.ai until you can see the chat interface, then try again.",
@@ -54,9 +56,11 @@ const LANG_STRINGS = {
     steps: `<b>Tr\u01b0\u1edbc khi b\u1eaft \u0111\u1ea7u:</b><br>
       1. \u0110\u00e3 \u0111\u0103ng nh\u1eadp <a href="https://muse.ai/" target="_blank" style="color:#2fbfab">muse.ai</a> tr\u00ean tr\u00ecnh duy\u1ec7t n\u00e0y.<br>
       2. \u0110i\u1ec1n s\u1eb5n \u0111\u1ecba ch\u1ec9 gateway v\u00e0 Admin Key (l\u1ea5y t\u1eeb tab \u201cAccounts\u201d tr\u00ean dashboard muse2api).`,
-    foot: `\u0110\u1ecdc cookie muse.ai qua <code>chrome.cookies</code> v\u00e0 POST l\u00ean gateway c\u1ee7a b\u1ea1n. Kh\u00f4ng g\u1eedi l\u00ean b\u00ean th\u1ee9 ba. Cookie kh\u00f4ng \u0111\u01b0\u1ee3c l\u01b0u trong extension.`,
+    foot: `\u0110\u1ecdc cookie muse.ai qua <code>chrome.cookies</code> v\u00e0 POST l\u00ean gateway c\u1ee7a b\u1ea1n. Kh\u00f4ng g\u1eedi l\u00ean b\u00ean th\u1ee9 ba. Cookie v\u00e0 Admin Key kh\u00f4ng \u0111\u01b0\u1ee3c l\u01b0u.`,
     noBase: "Vui l\u00f2ng nh\u1eadp \u0111\u1ecba ch\u1ec9 gateway tr\u01b0\u1edbc.",
     noKey: "Vui l\u00f2ng nh\u1eadp Admin Key tr\u01b0\u1edbc.",
+    httpsOnly: "Gateway ph\u1ea3i d\u00f9ng HTTPS; HTTP ch\u1ec9 \u0111\u01b0\u1ee3c ph\u00e9p v\u1edbi localhost.",
+    permission: "Ch\u01b0a \u0111\u01b0\u1ee3c c\u1ea5p quy\u1ec1n truy c\u1eadp gateway.",
     reading: "\u0110ang \u0111\u1ecdc cookie muse.ai\u2026",
     noCookies: "Kh\u00f4ng t\u00ecm th\u1ea5y cookie muse.ai.\nH\u00e3y m\u1edf v\u00e0 \u0111\u0103ng nh\u1eadp https://muse.ai/ tr\u00ean tr\u00ecnh duy\u1ec7t n\u00e0y tr\u01b0\u1edbc.",
     missingCore: "\u0110\u1ecdc \u0111\u01b0\u1ee3c {n} cookie nh\u01b0ng thi\u1ebfu core: {missing}\n\u0110\u0103ng nh\u1eadp muse.ai \u0111\u1ebfn khi th\u1ea5y giao di\u1ec7n chat r\u1ed3i th\u1eed l\u1ea1i.",
@@ -78,9 +82,11 @@ const LANG_STRINGS = {
     steps: `<b>\u5f00\u59cb\u524d\u8bf7\u786e\u8ba4\uff1a</b><br>
       1. \u5df2\u5728<b>\u8fd9\u4e2a\u6d4f\u89c8\u5668</b>\u767b\u5f55\u4e86 <a href="https://muse.ai/" target="_blank" style="color:#2fbfab">muse.ai</a>\u3002<br>
       2. \u5df2\u586b\u5199\u7f51\u5173\u5730\u5740\u548c Admin Key\uff08\u4ece muse2api \u7ba1\u7406\u9875\u300c\u8d26\u53f7\u300d\u6807\u7b7e\u9875\u9876\u90e8\u590d\u5236\uff09\u3002`,
-    foot: `\u901a\u8fc7 <code>chrome.cookies</code> \u8bfb\u53d6 muse.ai Cookie\uff0cPOST \u5230\u4f60\u586b\u5199\u7684\u7f51\u5173\u3002\u4e0d\u4e0a\u4f20\u5230\u4efb\u4f55\u7b2c\u4e09\u65b9\u3002Cookie \u4e0d\u4f1a\u5b58\u5165\u6269\u5c55\u7a0b\u5e8f\u5b58\u50a8\u3002`,
+    foot: `\u901a\u8fc7 <code>chrome.cookies</code> \u8bfb\u53d6 muse.ai Cookie\uff0cPOST \u5230\u4f60\u586b\u5199\u7684\u7f51\u5173\u3002\u4e0d\u4e0a\u4f20\u5230\u4efb\u4f55\u7b2c\u4e09\u65b9\u3002Cookie \u548c Admin Key \u4e0d\u4f1a\u5b58\u50a8\u3002`,
     noBase: "\u8bf7\u5148\u586b\u5199\u7f51\u5173\u5730\u5740\u3002",
     noKey: "\u8bf7\u5148\u586b\u5199 Admin Key\u3002",
+    httpsOnly: "\u8fdc\u7a0b\u7f51\u5173\u5fc5\u987b\u4f7f\u7528 HTTPS\uff1bHTTP \u4ec5\u9650 localhost\u3002",
+    permission: "\u672a\u6388\u4e88\u7f51\u5173\u8bbf\u95ee\u6743\u9650\u3002",
     reading: "\u6b63\u5728\u8bfb\u53d6 muse.ai Cookie\u2026",
     noCookies: "\u6ca1\u6709\u627e\u5230 muse.ai Cookie\u3002\n\u8bf7\u5148\u5728\u8fd9\u4e2a\u6d4f\u89c8\u5668\u767b\u5f55 https://muse.ai/\uff0c\u518d\u56de\u6765\u70b9\u51fb\u3002",
     missingCore: "\u8bfb\u5230 {n} \u6761 Cookie\uff0c\u4f46\u7f3a\u5c11\u6838\u5fc3\u9879\uff1a{missing}\n\u8bf7\u767b\u5f55\u5230\u80fd\u770b\u5230\u804a\u5929\u754c\u9762\u518d\u91cd\u8bd5\u3002",
@@ -139,12 +145,22 @@ function normBase(v) {
   return s;
 }
 
+function secureGateway(v) {
+  let url;
+  try { url = new URL(v); } catch (e) { return false; }
+  if (url.username || url.password || url.search || url.hash) return false;
+  if (url.protocol === "https:") return true;
+  return url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname.toLowerCase());
+}
+
 // ---- config ----
 async function loadCfg() {
   const o = await chrome.storage.local.get(STORE_KEY);
   const c = o[STORE_KEY] || {};
+  if (Object.prototype.hasOwnProperty.call(c, "key")) {
+    await chrome.storage.local.set({ [STORE_KEY]: { base: c.base || "", label: c.label || "" } });
+  }
   if (c.base) $("base").value = c.base;
-  if (c.key) $("key").value = c.key;
   if (c.label) $("label").value = c.label;
   // Auto-detect from active tab if on the dashboard
   if (!c.base) {
@@ -153,20 +169,22 @@ async function loadCfg() {
       const u = tab && tab.url ? new URL(tab.url) : null;
       if (u && /\/dashboard/.test(u.pathname)) {
         $("base").value = u.origin;
-        const k = new URLSearchParams(u.search).get("key");
-        if (k) $("key").value = k;
       }
     } catch (e) {}
   }
 }
 
-async function saveCfg(base, key, label) {
-  await chrome.storage.local.set({ [STORE_KEY]: { base, key, label } });
-  // Request optional host permission for the gateway URL.
+async function saveCfg(base, label) {
+  await chrome.storage.local.set({ [STORE_KEY]: { base, label } });
+}
+
+async function requestGatewayPermission(base) {
   try {
     const url = new URL(base);
-    await chrome.permissions.request({ origins: [`${url.origin}/*`] });
-  } catch (e) {}
+    return await chrome.permissions.request({ origins: [`${url.origin}/*`] });
+  } catch (e) {
+    return false;
+  }
 }
 
 // ---- cookie reading ----
@@ -191,6 +209,8 @@ async function run() {
 
   if (!base) { log(s("noBase"), "bad"); return; }
   if (!key) { log(s("noKey"), "bad"); return; }
+  if (!secureGateway(base)) { log(s("httpsOnly"), "bad"); return; }
+  if (!await requestGatewayPermission(base)) { log(s("permission"), "bad"); return; }
 
   $("go").disabled = true;
   log(s("reading"));
@@ -234,7 +254,8 @@ async function run() {
     }
 
     const added = (data.added && data.added[0]) || (data.account) || {};
-    await saveCfg(base, key, label);
+    await saveCfg(base, label);
+    $("key").value = "";
     const expTs = added.expires_at
       || (expires["hatch_vml"] ? expires["hatch_vml"] : null);
     log(

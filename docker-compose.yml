@@ -7,7 +7,7 @@ services:
       - path: .env
         required: false
     ports:
-      - "18610:18610"
+      - "${MUSE2API_PUBLISH_HOST:-127.0.0.1}:18610:18610"
     volumes:
       - ./data:/app/data
     shm_size: "1gb"

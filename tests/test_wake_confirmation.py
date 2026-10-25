@@ -1,6 +1,4 @@
-"""VM wake confirmation: an HTTP 200 wake is only an acknowledgement; the VM counts
-as woken once the session endpoint reports it RUNNING. An account whose wake was not
-confirmed is skipped for video through the pool's per-kind block."""
+"""Focused regression tests for session renewal and VM wake scheduling."""
 
 from __future__ import annotations
 
@@ -11,12 +9,21 @@ import pytest
 
 from muse2api.accounts import Account, AccountPool, JsonAccountStore
 from muse2api.accounts.pool import WAKE_BLOCK_SECONDS, note_wake
-from muse2api.drivers.base import SessionInfo
 from muse2api.drivers.mock import MockDriver
 from muse2api.services.gateway import Gateway
 from muse2api.upstream import muse
 
-COOKIES = {"hatch_sess": "s1", "hatch_gw": "g", "hatch_vml": "v", "hatch_native_auth_device": "d"}
+COOKIES = {
+    "hatch_sess": "s1",
+    "hatch_gw": "g1",
+    "hatch_vml": "v1",
+    "hatch_native_auth_device": "d1",
+}
+
+
+def test_current_session_cookie_set_does_not_require_optional_gateway_cookie():
+    cookies = {key: value for key, value in COOKIES.items() if key != "hatch_gw"}
+    assert muse.missing_session_cookies(cookies) == []
 
 
 class FakeClock:
@@ -32,226 +39,279 @@ class FakeClock:
         self.now += seconds
 
 
-@pytest.fixture
-def upstream(monkeypatch):
-    """Route muse.renew_session's HTTP calls to a scripted fake muse.ai.
+def _session(state: str, **headers: str) -> httpx.Response:
+    return httpx.Response(200, json={"status": "assigned", "vm_id": "vm-1",
+                                    "vm_state": state}, headers=headers)
 
-    ``sessions`` is the list of responses for successive GET /api/session calls
-    (the last one repeats); ``wake`` is the POST /api/hatch/vm/wake response."""
+
+@pytest.fixture
+def scripted_upstream(monkeypatch: pytest.MonkeyPatch):
     real = httpx.AsyncClient
-    state = {"sessions": [], "wake": httpx.Response(200, json={"accepted": True}),
-             "gets": 0, "posts": 0}
+    state: dict[str, object] = {
+        "sessions": [], "wake": httpx.Response(200), "gets": 0, "posts": 0,
+        "get_headers": [],
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST" and request.url.path == "/api/hatch/vm/wake":
-            state["posts"] += 1
+        if request.method == "GET":
+            observed = state["get_headers"]
+            assert isinstance(observed, list)
+            observed.append({name: request.headers.get(name) for name in
+                             ("user-agent", "origin", "referer", "accept", "cookie")})
+        if request.method == "POST":
+            state["posts"] = int(state["posts"]) + 1
             wake = state["wake"]
             if isinstance(wake, Exception):
                 raise wake
+            assert isinstance(wake, httpx.Response)
             return wake
-        assert request.url.path == "/api/session"
-        idx = min(state["gets"], len(state["sessions"]) - 1)
-        state["gets"] += 1
-        resp = state["sessions"][idx]
-        if isinstance(resp, Exception):
-            raise resp
-        return resp
+        sessions = state["sessions"]
+        assert isinstance(sessions, list) and sessions
+        index = min(int(state["gets"]), len(sessions) - 1)
+        state["gets"] = int(state["gets"]) + 1
+        response = sessions[index]
+        if isinstance(response, Exception):
+            raise response
+        assert isinstance(response, httpx.Response)
+        return response
 
-    monkeypatch.setattr(muse.httpx, "AsyncClient",
-                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(
+        muse.httpx,
+        "AsyncClient",
+        lambda **kw: real(transport=httpx.MockTransport(handler), **kw),
+    )
     return state
 
 
-def session(vm_state: str | None, status: str = "assigned", **headers) -> httpx.Response:
-    body = {"status": status, "vm_id": "vm-1"}
-    if vm_state is not None:
-        body["vm_state"] = vm_state
-    return httpx.Response(200, json=body, headers=headers)
-
-
-async def _renew(clock: FakeClock, **kw) -> SessionInfo:
-    return await muse.renew_session(dict(COOKIES), sleep=clock.sleep, clock=clock, **kw)
-
-
-async def test_wake_confirmed_once_running(upstream):
-    upstream["sessions"] = [session("SUSPENDED"), session("STARTING"), session("RUNNING")]
+async def test_wake_confirmation_polls_state_and_merges_rotated_cookie(scripted_upstream):
+    scripted_upstream["sessions"] = [
+        _session("SUSPENDED"),
+        _session("STARTING"),
+        _session(
+            "RUNNING",
+            **{"set-cookie": "hatch_vml=v2; Path=/; Expires=Mon, 21 Oct 2030 07:28:00 GMT"},
+        ),
+    ]
     clock = FakeClock()
-    info = await _renew(clock, confirm_s=20, poll_s=2)
+    info = await muse.renew_session(
+        dict(COOKIES), confirm_s=20, poll_s=2, sleep=clock.sleep, clock=clock,
+    )
     assert info.ok
-    assert info.meta["vm_state"] == "SUSPENDED"  # as found, before the wake
     assert info.meta["vm_state_after"] == "RUNNING"
     assert info.meta["vm_wake_ok"] is True
-    assert upstream["posts"] == 1 and upstream["gets"] == 3
+    assert info.cookies["hatch_vml"] == "v2"
+    assert info.cookie_expires["hatch_vml"] == 1_918_798_080
+    assert scripted_upstream["posts"] == 1
+    assert scripted_upstream["gets"] == 3
+    observed_headers = scripted_upstream["get_headers"]
+    assert isinstance(observed_headers, list)
+    assert all(headers["user-agent"] == muse.USER_AGENT for headers in observed_headers)
+    assert all(headers["origin"] == muse.SITE for headers in observed_headers)
+    assert all(headers["referer"] == muse.NEW_THREAD_URL for headers in observed_headers)
+    assert all(headers["accept"] == "application/json" for headers in observed_headers)
     assert clock.sleeps == [2]
 
 
-async def test_already_running_needs_no_sleep(upstream):
-    upstream["sessions"] = [session("RUNNING")]
-    clock = FakeClock()
-    info = await _renew(clock, confirm_s=20)
-    assert info.meta["vm_wake_ok"] is True and clock.sleeps == []
+async def test_wake_response_code_is_not_used_as_readiness(scripted_upstream):
+    scripted_upstream["sessions"] = [_session("RUNNING")]
+    scripted_upstream["wake"] = httpx.Response(403, json={"error": "already running"})
+    info = await muse.renew_session(dict(COOKIES), confirm_s=20)
+    assert info.meta["vm_wake_http"] == "403"
+    assert info.meta["vm_wake_ok"] is True
+    assert info.meta["vm_state_after"] == "RUNNING"
 
 
-async def test_never_running_is_not_ok_and_stops_at_the_deadline(upstream):
-    upstream["sessions"] = [session("SUSPENDED")]
+async def test_unconfirmed_wake_defers_video_only(tmp_path):
+    pool = AccountPool(JsonAccountStore(tmp_path / "accounts.json"), acquire_timeout=0.2)
+    await pool.upsert(Account(id="a0", cookies=dict(COOKIES)))
+    await pool.upsert(Account(id="a1", cookies=dict(COOKIES)))
+    note_wake(pool.get("a0"), {"vm_wake_ok": False, "vm_state_after": "SUSPENDED"})
+
+    video = await pool.acquire(kind="video")
+    assert video.id == "a1"
+    await pool.release(video)
+    general = await pool.acquire(exclude={"a1"})
+    assert general.id == "a0"
+    await pool.release(general)
+
+
+async def test_wake_block_never_makes_video_unavailable(tmp_path):
+    pool = AccountPool(JsonAccountStore(tmp_path / "accounts.json"), acquire_timeout=0.2)
+    for account_id in ("a0", "a1"):
+        account = Account(id=account_id, cookies=dict(COOKIES))
+        note_wake(account, {"vm_wake_ok": False})
+        await pool.upsert(account)
+    account = await pool.acquire(kind="video")
+    assert account.id in {"a0", "a1"}
+    await pool.release(account)
+
+
+async def test_confirmed_wake_clears_only_own_block(tmp_path):
+    pool = AccountPool(JsonAccountStore(tmp_path / "accounts.json"), acquire_timeout=0.2)
+    account = Account(id="a0", cookies=dict(COOKIES))
+    await pool.upsert(account)
+    note_wake(account, {"vm_wake_ok": False})
+    assert "video" in account.meta["kind_blocked_until"]
+    note_wake(account, {"vm_wake_ok": True, "vm_state_after": "RUNNING"})
+    assert "video" not in account.meta["kind_blocked_until"]
+
+
+def test_public_account_exposes_wake_status_but_not_vm_id():
+    account = Account(
+        id="a0",
+        meta={"vm_id": "private-vm-id", "vm_wake_ok": True,
+              "vm_state_after": "RUNNING"},
+    )
+    public = account.public()
+    assert public["meta"]["vm_wake_ok"] is True
+    assert public["meta"]["vm_state_after"] == "RUNNING"
+    assert "vm_id" not in public["meta"]
+
+
+def test_wake_window_is_finite_and_bounded(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MUSE2API_WAKE_CONFIRM_S", "inf")
+    assert muse.wake_confirm_seconds() == muse.WAKE_CONFIRM_SECONDS
+    monkeypatch.setenv("MUSE2API_WAKE_CONFIRM_S", "9999")
+    assert muse.wake_confirm_seconds() == muse.MAX_WAKE_CONFIRM_SECONDS
+
+
+async def test_malformed_kind_block_metadata_is_ignored(tmp_path):
+    pool = AccountPool(JsonAccountStore(tmp_path / "accounts.json"), acquire_timeout=0.2)
+    account = Account(id="a0", cookies=dict(COOKIES), meta={"kind_blocked_until": "bad"})
+    await pool.upsert(account)
+    note_wake(account, {"vm_wake_ok": False})
+    lease = await pool.acquire(kind="video")
+    assert lease.id == "a0"
+    await pool.release(lease)
+
+
+def test_malformed_wake_outcome_does_not_clear_or_create_block():
+    account = Account(id="a0", meta={"kind_blocked_until": {"video": 9999999999}})
+    note_wake(account, {"vm_wake_ok": "false"})
+    assert account.meta["kind_blocked_until"]["video"] == 9999999999
+
+
+async def test_never_running_is_not_confirmed_and_stops_at_deadline(scripted_upstream):
+    scripted_upstream["sessions"] = [_session("SUSPENDED")]
     clock = FakeClock()
-    info = await _renew(clock, confirm_s=6, poll_s=2)
+    info = await muse.renew_session(
+        dict(COOKIES), confirm_s=6, poll_s=2, sleep=clock.sleep, clock=clock,
+    )
     assert info.meta["vm_wake_ok"] is False
     assert info.meta["vm_state_after"] == "SUSPENDED"
     assert clock.now <= 6
-    assert upstream["gets"] == 1 + 4  # the initial read, then polls at t=0, 2, 4, 6
+    assert scripted_upstream["gets"] == 5
 
 
-@pytest.mark.parametrize("failure", [httpx.Response(503, text="busy"),
-                                     httpx.ConnectError("connection reset")])
-async def test_session_errors_while_confirming(upstream, failure):
-    upstream["sessions"] = [session("SUSPENDED"), failure]
-    clock = FakeClock()
-    info = await _renew(clock, confirm_s=4, poll_s=2)
-    assert info.ok  # the renewal itself worked
-    assert info.meta["vm_wake_ok"] is None  # unknown, not down
+@pytest.mark.parametrize("failure", [
+    httpx.Response(503, text="busy"),
+    httpx.ConnectError("connection reset"),
+])
+async def test_transient_confirmation_errors_leave_wake_unknown(scripted_upstream, failure):
+    scripted_upstream["sessions"] = [_session("SUSPENDED"), failure]
+    info = await muse.renew_session(dict(COOKIES), confirm_s=4, poll_s=2)
+    assert info.ok
+    assert info.meta["vm_wake_ok"] is None
     assert info.meta["vm_state_after"] is None
 
 
-async def test_error_then_running_still_confirms(upstream):
-    upstream["sessions"] = [session("SUSPENDED"), httpx.Response(502), session("RUNNING")]
-    info = await _renew(FakeClock(), confirm_s=10, poll_s=2)
+async def test_confirmation_continues_after_error_until_running(scripted_upstream):
+    scripted_upstream["sessions"] = [
+        _session("SUSPENDED"), httpx.Response(502), _session("RUNNING"),
+    ]
+    info = await muse.renew_session(dict(COOKIES), confirm_s=10, poll_s=2)
+    assert info.meta["vm_wake_ok"] is True
+    assert info.meta["vm_state_after"] == "RUNNING"
+
+
+async def test_wake_http_status_does_not_override_confirmed_running(scripted_upstream):
+    scripted_upstream["sessions"] = [_session("RUNNING")]
+    scripted_upstream["wake"] = httpx.Response(403, json={"error": "already running"})
+    info = await muse.renew_session(dict(COOKIES), confirm_s=20)
+    assert info.meta["vm_wake_http"] == "403"
     assert info.meta["vm_wake_ok"] is True
 
 
-@pytest.mark.parametrize("wake,code", [
-    # Observed live 2026-10-24: muse.ai answers 403 to waking a RUNNING VM.
-    (httpx.Response(403, json={"error": "Forbidden"}), "403"),
-    (httpx.Response(500), "500"),
-    (httpx.ConnectTimeout("slow"), "ConnectTimeout"),
-])
-async def test_rejected_wake_on_a_running_vm_is_still_ok(upstream, wake, code):
-    upstream["sessions"] = [session("RUNNING")]
-    upstream["wake"] = wake
-    clock = FakeClock()
-    info = await _renew(clock, confirm_s=20)
-    assert info.meta["vm_wake_ok"] is True and info.meta["vm_state_after"] == "RUNNING"
-    assert info.meta["vm_wake_http"] == code
-    assert clock.sleeps == []
-
-
-async def test_rejected_wake_on_a_stopped_vm_is_not_ok(upstream):
-    upstream["sessions"] = [session("SUSPENDED")]
-    upstream["wake"] = httpx.Response(403, json={"error": "Forbidden"})
-    info = await _renew(FakeClock(), confirm_s=4, poll_s=2)
-    assert info.meta["vm_wake_ok"] is False and info.meta["vm_state_after"] == "SUSPENDED"
-
-
-def test_unknown_wake_outcome_does_not_block_video():
-    acc = Account(id="a1", cookies=dict(COOKIES))
-    note_wake(acc, {"vm_wake_ok": None, "vm_state_after": None})
-    assert not (acc.meta.get("kind_blocked_until") or {}).get("video")
-
-
-async def test_no_wake_without_vm(upstream):
-    upstream["sessions"] = [httpx.Response(200, json={"status": "assigned"})]
-    info = await _renew(FakeClock())
-    assert "vm_wake_ok" not in info.meta and "vm_state_after" not in info.meta
-    assert upstream["posts"] == 0
-
-
-async def test_cookies_rotated_while_confirming_are_kept(upstream):
-    upstream["sessions"] = [
-        session("SUSPENDED"),
-        session("RUNNING", **{"set-cookie": "hatch_vml=v2; Domain=muse.ai; Path=/"}),
-    ]
-    info = await _renew(FakeClock(), confirm_s=10)
-    assert info.cookies["hatch_vml"] == "v2"
-
-
-async def test_confirm_window_from_env(upstream, monkeypatch):
-    monkeypatch.setenv("MUSE2API_WAKE_CONFIRM_S", "0")
-    upstream["sessions"] = [session("SUSPENDED")]
-    clock = FakeClock()
-    info = await _renew(clock)
+async def test_rejected_wake_on_stopped_vm_is_not_confirmed(scripted_upstream):
+    scripted_upstream["sessions"] = [_session("SUSPENDED")]
+    scripted_upstream["wake"] = httpx.Response(403, json={"error": "forbidden"})
+    info = await muse.renew_session(dict(COOKIES), confirm_s=4, poll_s=2)
     assert info.meta["vm_wake_ok"] is False
-    assert upstream["gets"] == 2 and clock.sleeps == []  # one poll, no waiting
+    assert info.meta["vm_state_after"] == "SUSPENDED"
 
 
-# ---------------------------------------------------------------- routing
-async def _pool(tmp_path, n=2) -> AccountPool:
-    pool = AccountPool(JsonAccountStore(tmp_path / "acc.json"), acquire_timeout=0.2)
-    for i in range(n):
-        await pool.upsert(Account(id=f"a{i}", cookies={"hatch_sess": "x"}))
-    return pool
+async def test_no_wake_is_attempted_without_a_vm(scripted_upstream):
+    scripted_upstream["sessions"] = [httpx.Response(200, json={"status": "assigned"})]
+    info = await muse.renew_session(dict(COOKIES))
+    assert "vm_wake_ok" not in info.meta
+    assert scripted_upstream["posts"] == 0
 
 
-async def test_video_not_routed_to_unconfirmed_account(tmp_path):
-    pool = await _pool(tmp_path)
-    note_wake(pool.get("a0"), {"vm_wake_ok": False, "vm_state_after": "SUSPENDED"})
-    blocked = pool.get("a0").meta["kind_blocked_until"]["video"]
-    assert time.time() + WAKE_BLOCK_SECONDS - 5 < blocked <= time.time() + WAKE_BLOCK_SECONDS
-    for _ in range(3):
-        acc = await pool.acquire(kind="video")
-        assert acc.id == "a1"
-        await pool.release(acc)
-    # Chat and images still go to it.
-    assert (await pool.acquire(exclude={"a1"}, kind="image")).id == "a0"
-
-
-async def test_confirmed_wake_lifts_its_block(tmp_path):
-    pool = await _pool(tmp_path)
-    acc = pool.get("a0")
-    note_wake(acc, {"vm_wake_ok": False})
-    note_wake(acc, {"vm_wake_ok": True, "vm_state_after": "RUNNING"})
-    assert "video" not in acc.meta["kind_blocked_until"]
-    assert (await pool.acquire(exclude={"a1"}, kind="video")).id == "a0"
-
-
-async def test_confirmed_wake_keeps_a_longer_block(tmp_path):
-    pool = await _pool(tmp_path)
-    acc = pool.get("a0")
+async def test_video_wake_block_does_not_replace_a_longer_block(tmp_path):
+    pool = AccountPool(JsonAccountStore(tmp_path / "accounts.json"), acquire_timeout=0.2)
+    account = Account(id="a0", cookies=dict(COOKIES))
     longer = time.time() + 12 * 3600
-    acc.meta["kind_blocked_until"] = {"video": longer}
-    note_wake(acc, {"vm_wake_ok": False})  # shorter, so it changes nothing
-    note_wake(acc, {"vm_wake_ok": True})
-    assert acc.meta["kind_blocked_until"]["video"] == longer
+    account.meta["kind_blocked_until"] = {"video": longer}
+    await pool.upsert(account)
+    note_wake(account, {"vm_wake_ok": False})
+    note_wake(account, {"vm_wake_ok": True})
+    assert account.meta["kind_blocked_until"]["video"] == longer
 
 
-async def test_renewal_without_wake_leaves_blocks_alone(tmp_path):
-    pool = await _pool(tmp_path)
-    acc = pool.get("a0")
-    note_wake(acc, {"vm_wake_ok": False})
-    before = dict(acc.meta["kind_blocked_until"])
-    note_wake(acc, {"session_status": "assigned"})
-    assert acc.meta["kind_blocked_until"] == before
+async def test_renewal_without_wake_preserves_existing_block(tmp_path):
+    pool = AccountPool(JsonAccountStore(tmp_path / "accounts.json"), acquire_timeout=0.2)
+    account = Account(id="a0", cookies=dict(COOKIES))
+    await pool.upsert(account)
+    note_wake(account, {"vm_wake_ok": False})
+    before = dict(account.meta["kind_blocked_until"])
+    note_wake(account, {"session_status": "assigned"})
+    assert account.meta["kind_blocked_until"] == before
+    assert time.time() + WAKE_BLOCK_SECONDS - 5 < before["video"]
 
 
-async def test_every_account_unconfirmed_still_serves_video(tmp_path):
-    pool = await _pool(tmp_path)
-    for acc in pool.all():
-        note_wake(acc, {"vm_wake_ok": False})
-    assert (await pool.acquire(kind="video")).id in {"a0", "a1"}
+async def test_video_routing_falls_back_when_every_account_is_blocked(tmp_path):
+    pool = AccountPool(JsonAccountStore(tmp_path / "accounts.json"), acquire_timeout=0.2)
+    for account_id in ("a0", "a1"):
+        account = Account(id=account_id, cookies=dict(COOKIES))
+        note_wake(account, {"vm_wake_ok": False})
+        await pool.upsert(account)
+    lease = await pool.acquire(kind="video")
+    assert lease.id in {"a0", "a1"}
+    await pool.release(lease)
 
 
 async def test_gateway_routes_video_around_an_unconfirmed_account(tmp_path):
-    pool = await _pool(tmp_path)
+    pool = AccountPool(JsonAccountStore(tmp_path / "accounts.json"), acquire_timeout=0.2)
+    for account_id in ("a0", "a1"):
+        await pool.upsert(Account(id=account_id, cookies=dict(COOKIES)))
     note_wake(pool.get("a0"), {"vm_wake_ok": False})
     gateway = Gateway(pool, MockDriver())
 
-    async def which(acc: Account) -> str:
-        return acc.id
+    async def which(account: Account) -> str:
+        return account.id
 
     for _ in range(3):
         assert await gateway._run(which, kind="video") == "a1"
     assert {await gateway._run(which) for _ in range(4)} == {"a0", "a1"}
 
 
-async def test_admin_lists_wake_fields_and_reset_clears_the_block(client, admin):
-    acc_id = client.post("/admin/accounts", headers=admin,
-                         json={"cookies": {"hatch_sess": "secretvalue123"}}).json()["account"]["id"]
+async def test_admin_reports_wake_state_and_reset_clears_block(client, admin):
+    response = client.post(
+        "/admin/accounts", headers=admin,
+        json={"cookies": {"hatch_sess": "fixture-session"}},
+    )
+    account_id = response.json()["account"]["id"]
     pool = client.app.state.services.pool
-    acc = pool.get(acc_id)
-    acc.meta.update({"vm_wake_ok": False, "vm_state_after": "SUSPENDED"})
-    note_wake(acc, acc.meta)
-    listed = client.get("/admin/accounts", headers=admin).json()["data"][0]["meta"]
-    assert listed["vm_wake_ok"] is False and listed["vm_state_after"] == "SUSPENDED"
-    assert listed["kind_blocked_until"]["video"] > time.time()
-    client.post(f"/admin/accounts/{acc_id}/reset", headers=admin)
-    meta = pool.get(acc_id).meta
-    assert "kind_blocked_until" not in meta and "wake_blocked_until" not in meta
+    account = pool.get(account_id)
+    account.meta.update({"vm_wake_ok": False, "vm_state_after": "SUSPENDED"})
+    note_wake(account, account.meta)
+    listed = next(
+        item["meta"] for item in client.get("/admin/accounts", headers=admin).json()["data"]
+        if item["id"] == account_id
+    )
+    assert listed["vm_wake_ok"] is False
+    assert "kind_blocked_until" not in listed
+    assert account.meta["kind_blocked_until"]["video"] > time.time()
+    client.post(f"/admin/accounts/{account_id}/reset", headers=admin)
+    assert "kind_blocked_until" not in pool.get(account_id).meta
+

@@ -22,6 +22,7 @@ _CANDIDATES = (
     "/snap/bin/chromium",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 )
+_IN_DOCKER = os.path.exists("/.dockerenv")
 
 
 def find_chromium(configured: str = "") -> str:
@@ -70,7 +71,7 @@ class ChromiumProcess:
         args = [
             self.executable,
             f"--remote-debugging-port={self.port}",
-            "--remote-allow-origins=*",
+            "--remote-allow-origins=http://127.0.0.1",
             f"--user-data-dir={self.profile_dir}",
             "--no-first-run",
             "--no-default-browser-check",
@@ -84,7 +85,10 @@ class ChromiumProcess:
             args.insert(1, f"--proxy-server={self.proxy}")
         if self.headless:
             args[1:1] = ["--headless=new", "--disable-gpu"]
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
+        # Docker's default seccomp profile blocks the user-namespace operation
+        # Chromium needs for its setuid sandbox. The browser is already isolated
+        # in its own container; keep the sandbox for regular host deployments.
+        if hasattr(os, "geteuid") and (os.geteuid() == 0 or _IN_DOCKER):
             args.insert(1, "--no-sandbox")
 
         log.info("launching Chromium: %s", self.executable)

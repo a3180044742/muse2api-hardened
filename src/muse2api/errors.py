@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .private_files import redact_secrets
+
 
 class Muse2APIError(Exception):
     status_code: int = 500
@@ -17,7 +19,13 @@ class Muse2APIError(Exception):
             self.code = code
 
     def to_body(self) -> dict[str, Any]:
-        return {"error": {"message": self.message, "type": self.error_type, "code": self.code}}
+        return {
+            "error": {
+                "message": redact_secrets(self.message),
+                "type": self.error_type,
+                "code": self.code,
+            }
+        }
 
 
 # --- client side ---

@@ -63,6 +63,25 @@ def test_legacy_and_admin_keys_are_isolated(client, auth, admin):
     assert names == [None, None, "legacy"]
 
 
+def test_query_and_authorization_credentials_are_not_logged(client, admin):
+    query_key = "query-key-fixture"
+    query_token = "query-token-fixture"
+    header_key = "header-key-fixture"
+    response = client.get(
+        "/v1/models",
+        params={"api_key": query_key, "access_token": query_token},
+        headers=_bearer(header_key),
+    )
+
+    assert response.status_code == 401
+    rows = _requests(client, admin)
+    assert len(rows) == 1
+    assert rows[0]["path"] == "/v1/models"
+    serialized = json.dumps({"response": response.json(), "row": rows[0]})
+    for secret in (query_key, query_token, header_key):
+        assert secret not in serialized
+
+
 def test_request_logged(client, admin):
     key = client.post("/admin/keys", headers=admin, json={"name": "bob"}).json()
     headers = {**_bearer(key["api_key"]), "cf-connecting-ip": "203.0.113.7"}

@@ -4,6 +4,8 @@ import base64
 import json
 import time
 
+from muse2api.errors import UpstreamError
+
 
 def test_health(client):
     assert client.get("/healthz").json()["ok"] is True
@@ -49,6 +51,25 @@ def test_chat_wrong_model_kind(client, auth):
     r = client.post("/v1/chat/completions", headers=auth, json={
         "model": "muse-video", "messages": [{"role": "user", "content": "x"}]})
     assert r.status_code == 400
+
+
+def test_upstream_error_response_redacts_credentials(client, auth, monkeypatch):
+    async def fail(_account, _request):
+        raise UpstreamError(
+            "upstream rejected Authorization: Bearer response-bearer-fixture "
+            "api_key=response-key-fixture"
+        )
+        yield ""
+
+    monkeypatch.setattr(client.app.state.services.driver, "chat_stream", fail)
+    response = client.post("/v1/chat/completions", headers=auth, json={
+        "model": "gpt-4o", "messages": [{"role": "user", "content": "hello"}]})
+
+    assert response.status_code == 502
+    message = response.json()["error"]["message"]
+    assert "response-bearer-fixture" not in message
+    assert "response-key-fixture" not in message
+    assert "Bearer [REDACTED]" in message
 
 
 def test_image_url_and_media(client, auth):

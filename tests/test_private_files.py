@@ -7,6 +7,7 @@ import pytest
 
 from muse2api.accounts import Account, JsonAccountStore
 from muse2api.auth.keys import KeyStore
+from muse2api.errors import UpstreamError
 from muse2api.private_files import atomic_private_write, redact_secrets
 from muse2api.services.tasks import TaskManager
 
@@ -49,6 +50,21 @@ def test_redact_secrets_covers_query_and_runtime_credential_shapes():
     assert "[REDACTED]" in result
 
 
+def test_error_body_redacts_credentials_before_http_or_sse_serialization():
+    error = UpstreamError(
+        "upstream rejected Authorization: Bearer body-bearer-fixture "
+        "refresh_token=body-refresh-fixture"
+    )
+
+    body = error.to_body()
+    message = body["error"]["message"]
+
+    assert "body-bearer-fixture" not in message
+    assert "body-refresh-fixture" not in message
+    assert "Bearer [REDACTED]" in message
+    assert body["error"]["code"] == "upstream_error"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file mode bits")
 async def test_account_and_key_stores_use_private_modes_and_harden_existing_files(tmp_path):
     account_path = tmp_path / "accounts.json"
@@ -82,17 +98,19 @@ async def test_task_errors_are_redacted_before_persistence_and_logging(tmp_path,
     manager = TaskManager(tmp_path / "tasks.json")
 
     async def fail(_progress):
-        raise RuntimeError("upstream Bearer sk-abcdefghijklmnop refresh_token=oauth-secret")
+        raise RuntimeError(
+            "upstream Bearer task-bearer-fixture refresh_token=task-refresh-fixture"
+        )
 
     task = manager.submit("test", {}, fail)
     await manager._running[task.id]
 
     persisted = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))[0]
     error = persisted["error"]["message"]
-    assert "sk-abcdefghijklmnop" not in error
-    assert "oauth-secret" not in error
-    assert "sk-abcdefghijklmnop" not in caplog.text
-    assert "oauth-secret" not in caplog.text
+    assert "task-bearer-fixture" not in error
+    assert "task-refresh-fixture" not in error
+    assert "task-bearer-fixture" not in caplog.text
+    assert "task-refresh-fixture" not in caplog.text
     assert "RuntimeError" in caplog.text
 
 

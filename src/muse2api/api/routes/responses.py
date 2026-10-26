@@ -372,6 +372,7 @@ def _response_object(resp_id: str, msg_id: str, created: int, model: str, text: 
             "status": status,
             "output": output if output is not None else (
                 [_message_item(msg_id, text)] if status == "completed" else []),
+            "output_text": text if status == "completed" else "",
             "usage": _usage(input_text, text),
             # Prompt-emulated Muse calls are serial and return at most one call.
             "parallel_tool_calls": False,

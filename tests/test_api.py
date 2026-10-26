@@ -232,6 +232,7 @@ def test_responses_non_stream_string_input(client, auth):
     assert body["object"] == "response"
     assert body["status"] == "completed"
     assert body["id"].startswith("resp_")
+    assert "hello" in body["output_text"]
     out = body["output"][0]
     assert out["type"] == "message" and out["role"] == "assistant"
     assert "hello" in out["content"][0]["text"]
